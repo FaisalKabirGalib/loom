@@ -1,0 +1,6 @@
+{
+  "name": "loom/laravel-fixture",
+  "require": {
+    "laravel/framework": "^12.0"
+  }
+}

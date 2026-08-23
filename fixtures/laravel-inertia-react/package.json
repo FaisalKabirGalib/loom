@@ -1,0 +1,12 @@
+{
+  "name": "laravel-inertia-react-fixture",
+  "private": true,
+  "packageManager": "npm@10.8.2",
+  "dependencies": {
+    "@inertiajs/react": "2.0.3",
+    "react": "19.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.7.3"
+  }
+}

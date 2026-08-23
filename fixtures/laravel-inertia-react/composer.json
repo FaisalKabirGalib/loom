@@ -1,0 +1,7 @@
+{
+  "name": "loom/laravel-inertia-react-fixture",
+  "require": {
+    "inertiajs/inertia-laravel": "^2.0",
+    "laravel/framework": "^12.0"
+  }
+}

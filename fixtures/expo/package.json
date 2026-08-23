@@ -1,0 +1,13 @@
+{
+  "name": "expo-fixture",
+  "private": true,
+  "packageManager": "npm@10.8.2",
+  "dependencies": {
+    "expo": "52.0.28",
+    "react": "18.3.1",
+    "react-native": "0.76.6"
+  },
+  "devDependencies": {
+    "typescript": "5.7.3"
+  }
+}

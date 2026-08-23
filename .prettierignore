@@ -1,0 +1,7 @@
+.agents/
+.codex/
+.loom/
+.opencode/
+AGENT_WORKBENCH_ONE_SHOT_PROMPT.md
+opencode.json
+pnpm-lock.yaml

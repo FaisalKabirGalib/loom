@@ -1,0 +1,27 @@
+{
+  "name": "@loom/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "loom": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@loom/antigravity": "workspace:*",
+    "@loom/claude": "workspace:*",
+    "@loom/codex": "workspace:*",
+    "@loom/core": "workspace:*",
+    "@loom/mcp": "workspace:*",
+    "@loom/opencode": "workspace:*",
+    "@loom/omp": "workspace:*",
+    "@loom/profiles": "workspace:*",
+    "@loom/registry": "workspace:*",
+    "@loom/skills": "workspace:*"
+  }
+}
