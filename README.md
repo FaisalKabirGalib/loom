@@ -37,6 +37,23 @@ Apply refuses plans with uncovered requirements or selected candidates that do
 not have an exact version/revision. This prevents an unresolved catalog
 recommendation from being recorded as reproducible or active.
 
+## Install a standalone binary
+
+Download the binary for your platform from the
+[latest GitHub release](https://github.com/FaisalKabirGalib/loom/releases/latest),
+verify it against `SHA256SUMS`, make it executable on Linux or macOS, and place
+it on your `PATH`:
+
+```sh
+chmod +x loom-v*-linux-x64
+sudo install loom-v*-linux-x64 /usr/local/bin/loom
+loom --help
+```
+
+Release binaries embed Bun, Loom's runtime code, and all seven canonical skills;
+Node.js is not required. Native builds are published for Linux x64/ARM64, macOS
+x64/ARM64, and Windows x64.
+
 ## CLI
 
 | Command                                                              | Behavior                                                                            |

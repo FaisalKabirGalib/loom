@@ -47,7 +47,31 @@ const EXIT_APPROVAL = 3;
 const REGISTRY_KEY = "official-mcp";
 const REGISTRY_TTL = 60 * 60 * 1_000;
 const ENTRY_PATH = fileURLToPath(import.meta.url);
-const SKILLS_PATH = fileURLToPath(new URL("../../skills", import.meta.url));
+const AUTO_ENTRY_DISABLED =
+  Reflect.get(globalThis, Symbol.for("loom.cli.disable-auto-entry")) === true;
+
+interface CliRuntime {
+  skillsPath: string;
+  executablePath: string | undefined;
+}
+
+interface CliRuntimeOptions {
+  skillsPath: string;
+  executablePath?: string;
+}
+
+const cliRuntime: CliRuntime = {
+  skillsPath: fileURLToPath(new URL("../../skills", import.meta.url)),
+  executablePath: undefined,
+};
+
+export function configureCliRuntime(options: CliRuntimeOptions): void {
+  cliRuntime.skillsPath = resolve(options.skillsPath);
+  cliRuntime.executablePath =
+    options.executablePath === undefined
+      ? undefined
+      : resolve(options.executablePath);
+}
 
 export interface CliWriter {
   write(value: string): unknown;
@@ -210,33 +234,36 @@ function printLines(writer: CliWriter, lines: readonly string[]): void {
 
 function adapterFor(id: string | undefined): HarnessAdapter {
   const harness = id ?? "opencode";
+  const executable = cliRuntime.executablePath;
   if (harness === "opencode")
     return new OpenCodeHarnessAdapter({
-      command: [process.execPath, ENTRY_PATH, "mcp"],
-      skillsSource: SKILLS_PATH,
+      command: executable
+        ? [executable, "mcp"]
+        : [process.execPath, ENTRY_PATH, "mcp"],
+      skillsSource: cliRuntime.skillsPath,
     });
   if (harness === "codex")
     return new CodexHarnessAdapter({
-      command: ENTRY_PATH,
-      skillsSource: SKILLS_PATH,
+      command: executable ?? ENTRY_PATH,
+      skillsSource: cliRuntime.skillsPath,
     });
   if (harness === "claude")
     return new ClaudeHarnessAdapter({
-      command: process.execPath,
-      args: [ENTRY_PATH, "mcp"],
-      skillsSource: SKILLS_PATH,
+      command: executable ?? process.execPath,
+      args: executable ? ["mcp"] : [ENTRY_PATH, "mcp"],
+      skillsSource: cliRuntime.skillsPath,
     });
   if (harness === "omp")
     return new OmpHarnessAdapter({
-      command: process.execPath,
-      args: [ENTRY_PATH, "mcp"],
-      skillsSource: SKILLS_PATH,
+      command: executable ?? process.execPath,
+      args: executable ? ["mcp"] : [ENTRY_PATH, "mcp"],
+      skillsSource: cliRuntime.skillsPath,
     });
   if (harness === "antigravity")
     return new AntigravityHarnessAdapter({
-      command: process.execPath,
-      args: [ENTRY_PATH, "mcp"],
-      skillsSource: SKILLS_PATH,
+      command: executable ?? process.execPath,
+      args: executable ? ["mcp"] : [ENTRY_PATH, "mcp"],
+      skillsSource: cliRuntime.skillsPath,
     });
   throw new CliError(
     "usage.invalid-harness",
@@ -898,8 +925,7 @@ async function upgradeCommand(
 async function mcpCommand(parsed: ParsedArguments): Promise<number> {
   assertFlags(parsed, []);
   if (parsed.positionals.length !== 0) throw usageError();
-  const mcpPackage = "@loom/mcp";
-  const module = (await import(mcpPackage)) as Record<string, unknown>;
+  const module = (await import("@loom/mcp")) as Record<string, unknown>;
   const entry = [
     module.runLoomMcpServer,
     module.runMcp,
@@ -1009,6 +1035,7 @@ export async function runCli(
 const invokedPath =
   process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
 if (
+  !AUTO_ENTRY_DISABLED &&
   invokedPath !== undefined &&
   pathToFileURL(invokedPath).href === import.meta.url
 ) {

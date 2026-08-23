@@ -9,10 +9,11 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "build:binaries": "pnpm build && bun run scripts/build-binaries.ts",
     "clean": "tsc -b --clean",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "oxlint --deny-warnings packages integrations tests",
+    "lint": "oxlint --deny-warnings packages integrations scripts tests",
     "test": "pnpm build && vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",

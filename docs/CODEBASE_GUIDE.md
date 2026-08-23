@@ -128,6 +128,10 @@ references, a production build, and the Vitest suite. Run a focused test with:
 pnpm exec vitest run packages/core/src/detection.test.ts
 ```
 
+`pnpm build:binaries` creates standalone cross-platform executables and
+`SHA256SUMS` under the ignored `release/` directory. Tagged `v*` pushes run the
+release workflow in `.github/workflows/release.yml`.
+
 ## Common Changes
 
 ### Add A Capability
