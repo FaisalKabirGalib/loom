@@ -1,13 +1,18 @@
 import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   decodeSetupIntent,
   detectProject,
   type CapabilityCandidate,
 } from "@loom/core";
-import { BuiltinRegistry, type CapabilityRegistry } from "@loom/registry";
+import {
+  BuiltinRegistry,
+  SkillsCliRegistry,
+  type CapabilityRegistry,
+} from "@loom/registry";
 import { describe, expect, it, vi } from "vitest";
 
 import { createLoomToolHandlers } from "./handlers.js";
@@ -177,11 +182,99 @@ describe("createLoomToolHandlers", () => {
         "requestedCapabilities",
         "root",
         "schemaVersion",
+        "selectedSkills",
+        "selectionRationale",
         "task",
       ].sort(),
     );
     expect(JSON.stringify(intent)).not.toMatch(/https?:\/\//i);
     expect(intent).not.toHaveProperty("recipe");
     expect(intent).not.toHaveProperty("url");
+  });
+
+  it("requires explicit LLM selection from exact locked package skills", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-mcp-flutter-"));
+    const packageRoot = join(root, "cache/example_pkg-2.3.4");
+    await mkdir(join(root, ".dart_tool"), { recursive: true });
+    await mkdir(join(packageRoot, "skills/example-pkg-usage"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n  example_pkg: 2.3.4\n",
+    );
+    await writeFile(
+      join(root, "pubspec.lock"),
+      `packages:\n  example_pkg:\n    dependency: direct main\n    description:\n      name: example_pkg\n      sha256: ${"a".repeat(64)}\n      url: "https://pub.dev"\n    source: hosted\n    version: "2.3.4"\nsdks:\n  dart: ">=3.10.0 <4.0.0"\n`,
+    );
+    await writeFile(
+      join(root, ".dart_tool/package_config.json"),
+      JSON.stringify({
+        configVersion: 2,
+        packages: [
+          {
+            name: "example_pkg",
+            rootUri: pathToFileURL(packageRoot).href,
+            packageUri: "lib/",
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      join(packageRoot, "skills/example-pkg-usage/SKILL.md"),
+      "---\nname: example-pkg-usage\ndescription: Use ExamplePkg safely.\n---\n",
+    );
+    const handlers = createLoomToolHandlers({
+      cwd: () => root,
+      skillsRegistry: new SkillsCliRegistry({
+        runner: {
+          run: async () => ({
+            exitCode: 0,
+            stdout: "owner/repo@repo-skill\n",
+            stderr: "",
+          }),
+        },
+      }),
+      registrySkillResolver: {
+        resolve: async () => ({
+          repository: "https://github.com/owner/repo",
+          commit: "b".repeat(40),
+          path: "catalog/repo-skill",
+          contentHash: `sha256:${"c".repeat(64)}`,
+          description: "Pinned registry skill",
+        }),
+      },
+    });
+
+    const first = await handlers.setupRecommend({
+      task: "Use ExamplePkg",
+      networkDiscovery: false,
+    });
+    const searched = await handlers.skillSearch({ task: "Use ExamplePkg" });
+    const candidate = (searched.candidates as Array<{ id: string }>)[0]!;
+    const registryCandidate = (
+      searched.candidates as Array<Record<string, unknown>>
+    ).find(({ id }) => id === "skill:owner/repo@repo-skill");
+    const second = await handlers.setupRecommend({
+      task: "Use ExamplePkg",
+      networkDiscovery: false,
+      selectedSkills: [{ id: candidate.id, reason: "Direct task dependency" }],
+    });
+
+    expect(first).toMatchObject({ selectionRequired: true, command: null });
+    expect(searched).toMatchObject({ installCommand: null });
+    expect(JSON.stringify(searched)).toContain(`sha256:${"a".repeat(64)}`);
+    expect(registryCandidate).toMatchObject({
+      commit: "b".repeat(40),
+      path: "catalog/repo-skill",
+      contentHash: `sha256:${"c".repeat(64)}`,
+    });
+    expect(decodeSetupIntent(second.intent as string).selectedSkills).toEqual([
+      expect.objectContaining({
+        id: candidate.id,
+        reason: "Direct task dependency",
+        bindingHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      }),
+    ]);
   });
 });

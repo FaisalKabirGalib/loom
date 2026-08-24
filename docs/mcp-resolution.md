@@ -6,8 +6,9 @@ for a project.
 ## Loom MCP server
 
 `loom mcp` runs a stdio server named `loom` at the current Loom version. It
-exposes exactly nine tools, all annotated read-only, non-destructive,
-idempotent, and closed-world:
+exposes exactly ten tools, all annotated read-only, non-destructive, and
+idempotent. Discovery tools are marked open-world when they may use network
+registries:
 
 | Tool                      | Result                                                                 |
 | ------------------------- | ---------------------------------------------------------------------- |
@@ -20,11 +21,12 @@ idempotent, and closed-world:
 | `loom_workflow_status`    | Redacted workflow state.                                               |
 | `loom_doctor`             | Local project/state diagnostics.                                       |
 | `loom_setup_recommend`    | Project-bound setup intent and one exact CLI command.                  |
+| `loom_skill_search`       | Locked package and registry skill evidence without installation.       |
 
 Tool names and registration are in
 [`packages/mcp/src/server.ts`](../packages/mcp/src/server.ts); behavior and
 input schemas are in [`handlers.ts`](../packages/mcp/src/handlers.ts). SDK
-transport tests assert that exactly these nine tools initialize and can be
+transport tests assert that exactly these ten tools initialize and can be
 called.
 
 ## Discovery

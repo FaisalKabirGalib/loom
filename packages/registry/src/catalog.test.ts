@@ -32,7 +32,7 @@ describe("BUILTIN_CATALOG", () => {
       "21st MCP",
       "axe accessibility",
       "Lighthouse",
-      "Flutter Agent Plugins",
+      "Flutter Package Intelligence",
       "Dart / Flutter MCP",
       "Patrol MCP",
       "Marionette MCP",
@@ -88,8 +88,19 @@ describe("BUILTIN_CATALOG", () => {
     }
     expect(
       BUILTIN_CATALOG.find(
-        (candidate) => candidate.id === "builtin:flutter-agent-plugins",
+        (candidate) => candidate.id === "builtin:flutter-package-intelligence",
       )?.version,
-    ).toBe("1e5696a2e986345f7ecc92842b5e9293bc079d6f");
+    ).toBe("0.9.0+skills.1.0.0");
+    expect(
+      BUILTIN_CATALOG.find(
+        (candidate) => candidate.id === "builtin:flutter-package-intelligence",
+      )?.provides,
+    ).toEqual(
+      expect.arrayContaining([
+        "DOCS.package-docs",
+        "DOCS.source-inspection",
+        "SECURITY.dependency-risk",
+      ]),
+    );
   });
 });

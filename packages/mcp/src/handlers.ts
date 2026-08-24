@@ -26,11 +26,16 @@ import {
   BuiltinRegistry,
   GitHubProvenanceRegistry,
   OfficialMcpRegistry,
+  SkillsCliRegistry,
+  GitHubSkillResolver,
   capabilityQuerySchema,
   planProject,
+  discoverFlutterSkills,
+  flutterSkillBindingHash,
   registryVersionSchema,
   type CapabilityQueryInput,
   type CapabilityRegistry,
+  type RegistrySkillResolver,
 } from "@loom/registry";
 import { z } from "zod";
 
@@ -68,14 +73,34 @@ export const capabilityResolveInputSchema = z
   })
   .strict();
 export const statusInputSchema = z.object({ root: rootSchema }).strict();
+const selectedSkillSchema = z
+  .object({ id: nonBlank.max(300), reason: nonBlank.max(2_000) })
+  .strict();
+export const skillSearchInputSchema = z
+  .object({ root: rootSchema, task: z.string().trim().max(10_000).optional() })
+  .strict();
 export const setupRecommendInputSchema = z
   .object({
     root: rootSchema,
     task: z.string().trim().min(1).max(10_000).optional(),
     harness: z.literal("opencode").default("opencode"),
     networkDiscovery: setupNetworkDiscoverySchema,
+    selectedSkills: z.array(selectedSkillSchema).max(100).optional(),
+    selectionRationale: nonBlank.max(4_096).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((input, context) => {
+    if (
+      input.selectedSkills !== undefined &&
+      input.selectedSkills.length === 0 &&
+      input.selectionRationale === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["selectionRationale"],
+        message: "Choosing zero skills requires a rationale",
+      });
+  });
 
 export interface LoomMcpDependencies {
   cwd?: () => string;
@@ -90,6 +115,8 @@ export interface LoomMcpDependencies {
   ) => Promise<ProjectResolution>;
   localRegistries?: readonly CapabilityRegistry[];
   networkRegistries?: () => readonly CapabilityRegistry[];
+  skillsRegistry?: SkillsCliRegistry;
+  registrySkillResolver?: RegistrySkillResolver;
 }
 
 export interface ProjectResolution {
@@ -111,6 +138,7 @@ export interface LoomToolHandlers {
   workflowStatus(input: unknown): Promise<ToolData>;
   doctor(input: unknown): Promise<ToolData>;
   setupRecommend(input: unknown): Promise<ToolData>;
+  skillSearch(input: unknown): Promise<ToolData>;
 }
 
 interface StateResult {
@@ -134,6 +162,9 @@ export function createLoomToolHandlers(
   const networkRegistries =
     dependencies.networkRegistries ??
     (() => [new OfficialMcpRegistry(), new GitHubProvenanceRegistry()]);
+  const skillsRegistry = dependencies.skillsRegistry ?? new SkillsCliRegistry();
+  const registrySkillResolver =
+    dependencies.registrySkillResolver ?? new GitHubSkillResolver();
 
   const registriesFor = (
     networkDiscovery: boolean,
@@ -200,6 +231,32 @@ export function createLoomToolHandlers(
   };
 
   return {
+    async skillSearch(rawInput) {
+      const input = skillSearchInputSchema.parse(rawInput);
+      const { resolution } = await runPlan({
+        root: input.root,
+        task: input.task,
+        networkDiscovery: false,
+      });
+      const search = await discoverFlutterSkills(
+        resolution.project.root,
+        resolution.project,
+        resolution.task,
+        skillsRegistry,
+        registrySkillResolver,
+      );
+      return {
+        root: resolution.project.root,
+        task: resolution.task,
+        dependencies: {
+          ...resolution.project.dependencies,
+          ...resolution.project.devDependencies,
+        },
+        ...search,
+        installCommand: null,
+      };
+    },
+
     async projectDetect(rawInput) {
       const input = projectDetectInputSchema.parse(rawInput);
       const root = await resolveRoot(input.root);
@@ -251,6 +308,66 @@ export function createLoomToolHandlers(
     async setupRecommend(rawInput) {
       const input = setupRecommendInputSchema.parse(rawInput);
       const { resolution, discovery } = await runPlan(input);
+      const flutterCandidate = resolution.project.frameworks.some(
+        (name) => name === "flutter" || name === "dart",
+      )
+        ? resolution.candidates.find(
+            ({ id }) => id === "builtin:flutter-package-intelligence",
+          )
+        : undefined;
+      const search =
+        flutterCandidate === undefined
+          ? { candidates: [], terms: [], warnings: [] }
+          : await discoverFlutterSkills(
+              resolution.project.root,
+              resolution.project,
+              resolution.task,
+              skillsRegistry,
+              registrySkillResolver,
+            );
+      if (
+        flutterCandidate !== undefined &&
+        input.selectedSkills === undefined
+      ) {
+        return {
+          selectionRequired: true,
+          command: null,
+          candidates: search.candidates,
+          terms: search.terms,
+          warnings: [
+            ...(discovery["warnings"] as string[]),
+            ...search.warnings,
+          ],
+        };
+      }
+      const requestedSelections = input.selectedSkills ?? [];
+      const selectionRationale =
+        input.selectionRationale ??
+        (flutterCandidate === undefined
+          ? "No Flutter package skill selection applies to this project"
+          : undefined);
+      const available = new Map(
+        search.candidates.map((candidate) => [candidate.id, candidate]),
+      );
+      const selectedSkills = requestedSelections.map((selection) => {
+        const candidate = available.get(selection.id);
+        if (candidate === undefined)
+          throw new Error(
+            `Selected skill is unrelated or stale: ${selection.id}`,
+          );
+        if (
+          candidate.source === "skills-registry" &&
+          (candidate.commit === undefined ||
+            candidate.contentHash === undefined)
+        )
+          throw new Error(
+            `Selected registry skill is not pinned: ${selection.id}`,
+          );
+        return {
+          ...selection,
+          bindingHash: flutterSkillBindingHash(candidate),
+        };
+      });
       const requestedCapabilities = [
         ...new Set(resolution.plan.selected.flatMap((item) => item.coverage)),
       ].sort((a, b) => a.localeCompare(b));
@@ -269,6 +386,8 @@ export function createLoomToolHandlers(
           ? {}
           : { task: String(redactSecrets(input.task)) }),
         requestedCapabilities,
+        selectedSkills,
+        ...(selectionRationale === undefined ? {} : { selectionRationale }),
       });
       return {
         intent,
@@ -284,6 +403,7 @@ export function createLoomToolHandlers(
         approvals: resolution.plan.requiredApprovals,
         uncovered: resolution.plan.uncovered,
         warnings: discovery["warnings"],
+        skillSelections: selectedSkills,
       };
     },
 

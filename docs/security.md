@@ -37,17 +37,24 @@ same hash.
 
 ## LLM-assisted setup
 
-- Loom MCP remains read-only. The host LLM can produce only a strict intent
-  token containing project identity, task, harness, and capability enums.
+- Loom MCP remains read-only. The host LLM searches project dependencies and
+  registry skills, then produces a strict intent token containing project
+  identity, task, harness, capability enums, selected skill IDs, reasons, and
+  immutable binding hashes.
 - The CLI re-detects the project and rejects root, fingerprint, capability,
   policy, recipe, version, or permission drift.
 - Install recipes contain fixed structured fields and execute argument arrays
   with `shell: false`; LLM text and registry runtime hints are never executed.
 - Setup approvals are authenticated with a user-private machine key and stored
   under the XDG state directory, outside the agent-writable project.
-- The initial OpenCode/Flutter recipe fetches an exact Git commit, copies only
-  22 top-level instruction-only skills, excludes hooks and scripts, and
-  activates the absolute Dart SDK MCP command.
+- The OpenCode/Flutter recipe creates an isolated project-local Dart package
+  with an enforced lockfile, activates the absolute Dart SDK MCP and an
+  ownership-hashed, project-local compiled pub.dev explorer, and installs only
+  skills explicitly selected by the host LLM. The local package cache is cleared
+  and refetched before any package executable runs. Hosted skills are bound to
+  package versions and archive hashes; registry skills are fetched from exact
+  commits and checked against reviewed content hashes. Unowned paths, symlinks,
+  and mutable registry references are rejected.
 - Setup transactions record exact plan and recipe digests. Rollback removes only
   setup-owned external resources and retains the Loom connection.
 

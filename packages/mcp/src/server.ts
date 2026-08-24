@@ -11,6 +11,7 @@ import {
   projectDetectInputSchema,
   projectPlanInputSchema,
   setupRecommendInputSchema,
+  skillSearchInputSchema,
   statusInputSchema,
   type LoomMcpDependencies,
 } from "./handlers.js";
@@ -18,6 +19,7 @@ import {
 export const LOOM_TOOL_NAMES = [
   "loom_project_detect",
   "loom_project_plan",
+  "loom_skill_search",
   "loom_explain",
   "loom_capability_search",
   "loom_capability_resolve",
@@ -83,6 +85,13 @@ export function createLoomMcpServer(
     "Create a minimal capability plan without mutation",
     projectPlanInputSchema,
     handlers.projectPlan,
+    true,
+  );
+  register(
+    "loom_skill_search",
+    "Search locked Dart package and pinned registry skills without installing",
+    skillSearchInputSchema,
+    handlers.skillSearch,
     true,
   );
   register(

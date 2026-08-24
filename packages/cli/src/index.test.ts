@@ -8,6 +8,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -16,8 +17,9 @@ import {
   encodeSetupIntent,
   sha256,
 } from "@loom/core";
+import { planProject } from "@loom/registry";
 
-import { runCli, type RunCliOptions } from "./index.js";
+import { configureCliRuntime, runCli, type RunCliOptions } from "./index.js";
 
 class BufferWriter {
   value = "";
@@ -56,6 +58,19 @@ function setupFingerprint(root: string): string {
     ...binding
   } = detectProject(root);
   return sha256(canonicalJson(binding));
+}
+
+async function setupCapabilities(
+  root: string,
+  task?: string,
+): Promise<string[]> {
+  const resolution = await planProject(
+    root,
+    task === undefined ? {} : { task },
+  );
+  return [
+    ...new Set(resolution.plan.selected.flatMap((item) => item.coverage)),
+  ].sort();
 }
 
 async function invoke(
@@ -154,6 +169,119 @@ describe("runCli", () => {
     expect(doctor.stdout).toContain("installed yes");
   });
 
+  it("restores an existing harness preimage after later setup failure", async () => {
+    const root = await fixture();
+    const skills = join(root, "skills-source");
+    const defaultSkills = fileURLToPath(
+      new URL("../../skills", import.meta.url),
+    );
+    await mkdir(skills);
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    configureCliRuntime({
+      skillsPath: skills,
+      executablePath: process.execPath,
+    });
+    try {
+      expect(
+        (await invoke(root, ["connect", "--harness", "opencode"])).code,
+      ).toBe(0);
+      const configPath = join(root, "opencode.json");
+      const ownershipPath = join(root, ".loom/ownership.json");
+      const configBefore = await readFile(configPath);
+      const ownershipBefore = await readFile(ownershipPath);
+      await mkdir(join(skills, "loom-new-skill"));
+      await writeFile(
+        join(skills, "loom-new-skill/SKILL.md"),
+        "---\nname: loom-new-skill\ndescription: Test.\n---\n",
+      );
+      const token = encodeSetupIntent({
+        schemaVersion: 1,
+        root,
+        projectFingerprint: setupFingerprint(root),
+        harness: "opencode",
+        mode: "apply",
+        requestedCapabilities: await setupCapabilities(root),
+        selectedSkills: [],
+        selectionRationale: "No package skill is relevant to this test",
+      });
+      await mkdir(join(root, ".loom/project.json"));
+      let observedHarnessMutation = false;
+      let installerRolledBack = false;
+      let installerUninstalled = false;
+      const rollbackToken = { id: "test-installer-rollback" };
+      const installer = {
+        async plan(
+          projectRoot: string,
+          recipe: NonNullable<
+            Parameters<
+              import("@loom/installers").CapabilityInstaller["plan"]
+            >[1]
+          >,
+        ) {
+          return {
+            candidate: "builtin:flutter-package-intelligence" as const,
+            root: projectRoot,
+            recipeDigest: "a".repeat(64),
+            recipe,
+            process: {
+              command: process.execPath,
+              args: [],
+              cwd: projectRoot,
+              env: {},
+              shell: false as const,
+            },
+            mutations: [],
+            diagnostics: [],
+            executionRequired: false,
+          };
+        },
+        async apply() {
+          return {
+            changed: ["installer-state"],
+            skipped: [],
+            diagnostics: [],
+            rollbackToken,
+          };
+        },
+        async verify() {
+          observedHarnessMutation = await exists(
+            join(root, ".agents/skills/loom-new-skill/SKILL.md"),
+          );
+          return [];
+        },
+        async uninstall() {
+          installerUninstalled = true;
+          return { changed: [], skipped: [], diagnostics: [] };
+        },
+        async rollback(token: { id: string }) {
+          installerRolledBack = token === rollbackToken;
+          return { changed: [], skipped: [], diagnostics: [] };
+        },
+      };
+      const result = await invoke(root, ["setup", "--intent", token], {
+        isTTY: true,
+        confirm: async () => true,
+        installerFactory: () => installer,
+        resolveExecutable: async () => process.execPath,
+      });
+
+      expect(result.code).toBe(1);
+      expect(observedHarnessMutation).toBe(true);
+      expect(installerRolledBack).toBe(true);
+      expect(installerUninstalled).toBe(false);
+      expect(await readFile(configPath)).toEqual(configBefore);
+      expect(await readFile(ownershipPath)).toEqual(ownershipBefore);
+      expect(
+        await exists(join(root, ".agents/skills/loom-new-skill/SKILL.md")),
+      ).toBe(false);
+    } finally {
+      configureCliRuntime({ skillsPath: defaultSkills });
+    }
+  });
+
   it("runs one-confirmation setup and reuses the exact approval", async () => {
     const root = await fixture();
     await writeFile(
@@ -167,24 +295,41 @@ describe("runCli", () => {
       harness: "opencode",
       mode: "apply",
       task: "work on this Flutter app",
-      requestedCapabilities: [
-        "MOBILE.framework-analysis",
-        "MOBILE.framework-docs",
-        "MOBILE.runtime-inspection",
-      ],
+      requestedCapabilities: await setupCapabilities(
+        root,
+        "work on this Flutter app",
+      ),
+      selectedSkills: [],
+      selectionRationale: "No package skill is relevant to this test",
     });
     let confirmations = 0;
+    let installerApplies = 0;
     const installer = {
-      async plan(projectRoot: string) {
+      async plan(
+        projectRoot: string,
+        recipe: NonNullable<
+          Parameters<import("@loom/installers").CapabilityInstaller["plan"]>[1]
+        >,
+      ) {
         return {
-          candidate: "builtin:flutter-agent-plugins" as const,
+          candidate: "builtin:flutter-package-intelligence" as const,
           root: projectRoot,
           recipeDigest: "a".repeat(64),
+          recipe,
+          process: {
+            command: process.execPath,
+            args: [],
+            cwd: projectRoot,
+            env: {},
+            shell: false as const,
+          },
           mutations: [],
           diagnostics: [],
+          executionRequired: true,
         };
       },
       async apply() {
+        installerApplies += 1;
         return { changed: [], skipped: [], diagnostics: [] };
       },
       async verify() {
@@ -209,6 +354,8 @@ describe("runCli", () => {
     ).toBe(0);
     const first = await invoke(root, ["setup", "--intent", token], options);
     const second = await invoke(root, ["setup", "--intent", token], options);
+    expect(first.code, first.stderr).toBe(0);
+    expect(second.code, second.stderr).toBe(0);
     const transaction = JSON.parse(
       await readFile(join(root, ".loom/setup-transaction.json"), "utf8"),
     ) as { transactionId: string };
@@ -224,6 +371,7 @@ describe("runCli", () => {
     expect(second.code).toBe(0);
     expect(second.stdout).toContain("approval         reused");
     expect(confirmations).toBe(1);
+    expect(installerApplies).toBe(2);
     expect(listed.stdout).toContain(transaction.transactionId);
     expect(rolledBack.code).toBe(0);
     expect(await exists(join(root, ".loom/setup-approval.json"))).toBe(false);
@@ -242,22 +390,34 @@ describe("runCli", () => {
       projectFingerprint: setupFingerprint(root),
       harness: "opencode",
       mode: "apply",
-      requestedCapabilities: [
-        "MOBILE.framework-analysis",
-        "MOBILE.framework-docs",
-        "MOBILE.runtime-inspection",
-      ],
+      requestedCapabilities: await setupCapabilities(root),
+      selectedSkills: [],
+      selectionRationale: "No package skill is relevant to this test",
     });
     let installerPlans = 0;
     const installer = {
-      async plan(projectRoot: string) {
+      async plan(
+        projectRoot: string,
+        recipe: NonNullable<
+          Parameters<import("@loom/installers").CapabilityInstaller["plan"]>[1]
+        >,
+      ) {
         installerPlans += 1;
         return {
-          candidate: "builtin:flutter-agent-plugins" as const,
+          candidate: "builtin:flutter-package-intelligence" as const,
           root: projectRoot,
           recipeDigest: "a".repeat(64),
+          recipe,
+          process: {
+            command: process.execPath,
+            args: [],
+            cwd: projectRoot,
+            env: {},
+            shell: false as const,
+          },
           mutations: [],
           diagnostics: [],
+          executionRequired: false,
         };
       },
       async apply() {
@@ -287,7 +447,7 @@ describe("runCli", () => {
 
     expect(result.code, result.stderr).toBe(3);
     expect(result.stderr).toContain("setup.confirmation-required");
-    expect(installerPlans).toBe(0);
+    expect(installerPlans).toBe(1);
   });
 
   it("treats missing state as normal before installation", async () => {
@@ -485,8 +645,9 @@ describe("runCli", () => {
       "--harness",
       "opencode",
       "--approve",
-      "builtin:flutter-agent-plugins",
+      "builtin:flutter-package-intelligence",
     ]);
+    expect(result.code, result.stderr).toBe(0);
     const lock = JSON.parse(
       await readFile(join(root, ".loom/capabilities.lock.json"), "utf8"),
     ) as { entries: Array<{ id: string; version: string }> };
@@ -498,8 +659,8 @@ describe("runCli", () => {
     expect(await exists(join(root, "opencode.json"))).toBe(true);
     expect(lock.entries).toContainEqual(
       expect.objectContaining({
-        id: "builtin:flutter-agent-plugins",
-        version: "1e5696a2e986345f7ecc92842b5e9293bc079d6f",
+        id: "builtin:flutter-package-intelligence",
+        version: "0.9.0+skills.1.0.0",
       }),
     );
     expect(doctor.code).toBe(0);

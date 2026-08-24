@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { LOOM_TOOL_NAMES, createLoomMcpServer } from "./server.js";
 
 describe("Loom MCP server", () => {
-  it("initializes, lists exactly nine tools, and calls a tool over the SDK transport", async () => {
+  it("initializes, lists exactly ten tools, and calls a tool over the SDK transport", async () => {
     const root = await mkdtemp(join(tmpdir(), "loom-mcp-"));
     const server = createLoomMcpServer({ cwd: () => root });
     const client = new Client({ name: "loom-test", version: "1.0.0" });

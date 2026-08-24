@@ -192,6 +192,8 @@ The setup path deliberately separates recommendation from execution:
 
 ```text
 host LLM
+  -> loom_skill_search MCP tool
+  -> select exact relevant skills with reasons
   -> loom_setup_recommend MCP tool
   -> loom1_... intent token
   -> loom setup --intent <token>
@@ -209,9 +211,13 @@ host LLM
 and recomputes all authoritative data. Schemas, canonical JSON, hashes, intents,
 plans, approvals, and transaction state live in `packages/core/src/setup.ts`.
 
-The currently audited external recipe is `FLUTTER_AGENT_PLUGINS_RECIPE` in
-`packages/installers/src/index.ts`. It binds an exact Git revision and a fixed
-set of instruction-only Flutter/Dart skills. A candidate without an audited
+The currently audited external recipe is `FLUTTER_PACKAGE_INTELLIGENCE_RECIPE`
+in `packages/installers/src/index.ts`. It binds exact `dart_pubdev_mcp` and
+`skills` versions in an isolated project-local Dart package, plus only the
+package or registry skills explicitly selected by the host LLM. Package skills
+are bound to the project lockfile and content hashes; registry skills are bound
+to exact commits and content hashes. The old fixed Flutter skill recipe is
+recognized only for safe migration or removal. A candidate without an audited
 typed recipe remains only a recommendation.
 
 ### 4. MCP Requests
@@ -224,6 +230,7 @@ tools:
 | ------------------------- | ----------------------------------------------------------- |
 | `loom_project_detect`     | Return the normalized project profile.                      |
 | `loom_project_plan`       | Resolve a capability plan.                                  |
+| `loom_skill_search`       | Search locked package and pinned registry skills.           |
 | `loom_explain`            | Explain selections and rejections.                          |
 | `loom_capability_search`  | Search candidates.                                          |
 | `loom_capability_resolve` | Resolve supplied capability needs.                          |

@@ -27,17 +27,25 @@ Use the built CLI from a project directory:
 ```
 
 Restart OpenCode, then ask `Set up this project with Loom` or run `/loom:setup`.
-The host LLM calls the read-only `loom_setup_recommend` tool and returns one
-`loom setup --intent loom1_...` command. Running it revalidates the project and
-exact recipe, shows one consolidated review, asks once, installs, activates,
-verifies, and records rollback state. An unchanged repeat is a verified no-op
-and reuses the authenticated approval.
+For Flutter, the host LLM searches locked package and registry skills with
+`loom_skill_search`, explicitly selects only task-relevant IDs (or justifies
+selecting none), then calls the read-only `loom_setup_recommend` tool and
+returns one `loom setup --intent loom1_...` command. Running it revalidates the
+project and exact recipe, shows one consolidated review, asks once, installs,
+activates, verifies, and records rollback state. An unchanged repeat is a
+verified no-op and reuses the authenticated approval.
 
 The first audited external recipe supports Flutter projects on OpenCode. It
-vendors only the 22 instruction-only skills from
-`flutter/agent-plugins@1e5696a2e986345f7ecc92842b5e9293bc079d6f` and activates
-the absolute Dart SDK's `mcp-server`; hooks and repository scripts are excluded.
-Other candidates remain recommendations until they have an audited typed recipe.
+creates `.loom/tools/flutter-package-intelligence` with exact
+`dart_pubdev_mcp@0.9.0` and `skills@1.0.0` locks, isolated project-local Dart
+state, the official Dart MCP, and `dart-pubdev-explorer`. Selected package
+skills are copied locally with version and content-hash ownership; Loom never
+defaults to the old 22-skill bundle. Hosted selections also run through local
+`skills 1.0.0` with explicit package/skill filters; GitHub selections are staged
+from their exact commit and verified hash. The explorer runs from an
+ownership-hashed project-local executable compiled after clearing and refetching
+the enforced package cache. Other candidates remain recommendations until they
+have an audited typed recipe.
 
 Apply refuses plans with uncovered requirements or selected candidates that do
 not have an exact version/revision. This prevents an unresolved catalog
@@ -107,13 +115,13 @@ skill directories.
 
 ## Verification status
 
-OpenCode is the verified setup path: a fresh host LLM invoked
-`loom_setup_recommend`, returned one setup command, installed all 22 pinned
-Flutter/Dart skills, connected Dart and Loom MCP servers, reused approval on an
-unchanged rerun, passed doctor, and rolled back external setup while retaining
-Loom. The Codex adapter was also applied twice, checked, and removed while
-OpenCode remained healthy, but Codex ignores project `.codex` configuration
-until the project is trusted.
+OpenCode is the verified setup path: a fresh host LLM searches package skills,
+selects exact relevant IDs, invokes `loom_setup_recommend`, and returns one
+setup command. Setup connects Dart, pub.dev explorer, and Loom MCP servers,
+reuses approval on an unchanged rerun, passed doctor, and rolled back external
+setup while retaining Loom. The Codex adapter was also applied twice, checked,
+and removed while OpenCode remained healthy, but Codex ignores project `.codex`
+configuration until the project is trusted.
 
 The Official MCP Registry and pinned `skills@1.5.23` integrations have mocked
 contract tests and live discovery smoke tests. Registry cache sync was also
@@ -122,6 +130,7 @@ verified across two resumable 1,000-candidate checkpoints.
 ## Documentation
 
 - [Codebase guide](docs/CODEBASE_GUIDE.md)
+- [Tech-stack support and extension guide](docs/TECH_STACK_SUPPORT.md)
 - [Architecture](docs/architecture.md)
 - [Capability model](docs/capability-model.md)
 - [MCP resolution](docs/mcp-resolution.md)

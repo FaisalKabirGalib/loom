@@ -8,10 +8,11 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 
@@ -51,7 +52,9 @@ import {
 } from "@loom/core";
 import {
   CapabilityInstaller,
-  FLUTTER_AGENT_PLUGINS_RECIPE,
+  FLUTTER_PACKAGE_INTELLIGENCE_RECIPE,
+  type FlutterPackageIntelligenceInstallRecipe,
+  type InstallerRollbackToken,
 } from "@loom/installers";
 import { OpenCodeHarnessAdapter } from "@loom/opencode";
 import { OmpHarnessAdapter } from "@loom/omp";
@@ -63,6 +66,8 @@ import {
   SkillsCliRegistry,
   planProject,
   syncRegistryCache,
+  discoverFlutterSkills,
+  flutterSkillBindingHash,
   type ProjectResolution,
   type RegistrySnapshot,
 } from "@loom/registry";
@@ -119,16 +124,121 @@ export interface RunCliOptions {
 }
 
 interface SetupInstaller {
-  plan(root: string): ReturnType<CapabilityInstaller["plan"]>;
+  plan(
+    root: string,
+    recipe: FlutterPackageIntelligenceInstallRecipe,
+  ): ReturnType<CapabilityInstaller["plan"]>;
   apply(
     plan: Awaited<ReturnType<CapabilityInstaller["plan"]>>,
     dryRun?: boolean,
   ): ReturnType<CapabilityInstaller["apply"]>;
   verify(root: string): ReturnType<CapabilityInstaller["verify"]>;
+  rollback?(
+    token: InstallerRollbackToken,
+  ): ReturnType<CapabilityInstaller["rollback"]>;
+  commit?(
+    token: InstallerRollbackToken,
+  ): ReturnType<CapabilityInstaller["commit"]>;
   uninstall(
     root: string,
     dryRun?: boolean,
   ): ReturnType<CapabilityInstaller["uninstall"]>;
+}
+
+interface HarnessPreimage {
+  path: string;
+  previous?: Buffer;
+  mode?: number;
+  intended?: Buffer;
+}
+
+async function assertHarnessPath(root: string, path: string): Promise<void> {
+  const pathFromRoot = relative(root, path);
+  if (
+    pathFromRoot === "" ||
+    pathFromRoot === ".." ||
+    pathFromRoot.startsWith(`..${sep}`)
+  )
+    throw new Error("Harness mutation escapes the project root");
+  let current = root;
+  for (const part of pathFromRoot.split(sep)) {
+    current = join(current, part);
+    const state = await lstat(current).catch((cause: NodeJS.ErrnoException) => {
+      if (cause.code === "ENOENT") return undefined;
+      throw cause;
+    });
+    if (state === undefined) return;
+    if (state.isSymbolicLink())
+      throw new Error("Harness mutation path contains a symlink");
+  }
+}
+
+async function harnessPreimages(
+  root: string,
+  plan: Awaited<ReturnType<HarnessAdapter["planInstall"]>>,
+): Promise<HarnessPreimage[]> {
+  return Promise.all(
+    plan.mutations.map(async (mutation) => {
+      const path = resolve(mutation.path);
+      await assertHarnessPath(root, path);
+      const state = await lstat(path).catch((cause: NodeJS.ErrnoException) => {
+        if (cause.code === "ENOENT") return undefined;
+        throw cause;
+      });
+      if (state !== undefined && !state.isFile())
+        throw new Error("Harness mutation path is not a file");
+      return {
+        path,
+        ...(state === undefined
+          ? {}
+          : { previous: await readFile(path), mode: state.mode & 0o777 }),
+        ...(mutation.kind === "delete-file"
+          ? {}
+          : { intended: Buffer.from(mutation.content ?? "") }),
+      };
+    }),
+  );
+}
+
+async function restoreHarnessPreimages(
+  root: string,
+  preimages: readonly HarnessPreimage[],
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const preimage of [...preimages].reverse()) {
+    try {
+      await assertHarnessPath(root, preimage.path);
+      const current = await readFile(preimage.path).catch(
+        (cause: NodeJS.ErrnoException) => {
+          if (cause.code === "ENOENT") return undefined;
+          throw cause;
+        },
+      );
+      if (
+        preimage.intended === undefined
+          ? current !== undefined
+          : current?.equals(preimage.intended) !== true
+      )
+        throw new Error("Harness file changed before rollback");
+      if (preimage.previous === undefined)
+        await rm(preimage.path, { force: true });
+      else {
+        await mkdir(dirname(preimage.path), { recursive: true });
+        const temporary = `${preimage.path}.${randomBytes(16).toString("hex")}.tmp`;
+        try {
+          await writeFile(temporary, preimage.previous, {
+            mode: preimage.mode ?? 0o600,
+          });
+          await rename(temporary, preimage.path);
+        } finally {
+          await rm(temporary, { force: true });
+        }
+      }
+    } catch {
+      failures.push(preimage.path);
+    }
+  }
+  return failures;
 }
 
 interface ParsedArguments {
@@ -747,25 +857,103 @@ async function setupCommand(
       "The generated setup intent no longer matches the resolved capabilities",
     );
   const unsupported = selected.filter(
-    (id) => id !== FLUTTER_AGENT_PLUGINS_RECIPE.candidate,
+    (id) =>
+      id !== FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate &&
+      id !== "builtin:dart-flutter-mcp",
   );
   if (unsupported.length > 0)
     throw new CliError(
       "setup.recipe-unavailable",
       `No audited install recipe is available for: ${unsupported.join(", ")}`,
     );
-  const recipe = {
-    kind: "git-skill" as const,
-    repository: FLUTTER_AGENT_PLUGINS_RECIPE.repository,
-    commit: FLUTTER_AGENT_PLUGINS_RECIPE.commit,
-    path: FLUTTER_AGENT_PLUGINS_RECIPE.sourcePath,
+  const skillSearch =
+    intent.selectedSkills.length === 0
+      ? { candidates: [] }
+      : await discoverFlutterSkills(
+          context.root,
+          resolution.project,
+          resolution.task,
+        );
+  const availableSkills = new Map(
+    skillSearch.candidates.map((candidate) => [candidate.id, candidate]),
+  );
+  const selectedSkills = intent.selectedSkills.map((selection) => {
+    const candidate = availableSkills.get(selection.id);
+    if (candidate === undefined)
+      throw new CliError(
+        "setup.skill-stale",
+        `Selected skill is unrelated or stale: ${selection.id}`,
+      );
+    if (selection.bindingHash !== flutterSkillBindingHash(candidate))
+      throw new CliError(
+        "setup.skill-stale",
+        `Selected skill binding changed: ${selection.id}`,
+      );
+    if (
+      candidate.source === "hosted-package" &&
+      candidate.package !== undefined &&
+      candidate.packageVersion !== undefined &&
+      candidate.packageContentHash !== undefined &&
+      candidate.archiveHash !== undefined &&
+      candidate.contentHash !== undefined
+    ) {
+      return {
+        source: candidate.source,
+        id: candidate.id,
+        reason: selection.reason,
+        package: candidate.package,
+        version: candidate.packageVersion,
+        packageContentHash: candidate.packageContentHash,
+        archiveHash: candidate.archiveHash,
+        path: candidate.path,
+        contentHash: candidate.contentHash,
+      } as const;
+    }
+    if (
+      candidate.source === "skills-registry" &&
+      candidate.repository !== undefined &&
+      candidate.commit !== undefined &&
+      candidate.contentHash !== undefined
+    ) {
+      return {
+        source: candidate.source,
+        id: candidate.id,
+        reason: selection.reason,
+        repository: candidate.repository,
+        commit: candidate.commit,
+        path: candidate.path,
+        contentHash: candidate.contentHash,
+      } as const;
+    }
+    throw new CliError(
+      "setup.skill-unpinned",
+      `Selected skill is not exactly pinned: ${selection.id}`,
+    );
+  });
+  const recipe: FlutterPackageIntelligenceInstallRecipe = {
+    kind: "flutter-package-intelligence",
+    toolPath: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath,
+    dartPubdevMcp: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.dartPubdevMcp,
+    skillsCli: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.skillsCli,
+    pubspecHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.pubspecHash,
+    lockfileHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.lockfileHash,
+    selectedSkills,
+    ...(intent.selectionRationale === undefined
+      ? {}
+      : { selectionRationale: intent.selectionRationale }),
   };
-  const candidates = resolution.plan.selected.map((item) => ({
-    id: item.candidate.id,
-    capabilities: [...item.coverage].sort(),
-    recipe,
-    recipeDigest: computeRecipeDigest(recipe),
-  }));
+  const candidates = resolution.project.frameworks.some(
+    (name) => name === "flutter" || name === "dart",
+  )
+    ? [
+        {
+          id: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate,
+          capabilities: resolvedCapabilities,
+          recipe,
+          recipeDigest: computeRecipeDigest(recipe),
+        },
+      ]
+    : [];
   const {
     detectionSignals: _detectionSignals,
     existingAgentConfigs: _existingAgentConfigs,
@@ -789,6 +977,8 @@ async function setupCommand(
       "setup.dart-unavailable",
       "The audited Flutter recipe requires an executable dart SDK on PATH",
     );
+  const dartDigest =
+    dart === undefined ? undefined : sha256(await readFile(dart));
   const git =
     candidates.length === 0
       ? undefined
@@ -798,8 +988,6 @@ async function setupCommand(
       "setup.git-unavailable",
       "The audited Flutter recipe requires an executable git on PATH",
     );
-  const dartDigest =
-    dart === undefined ? undefined : sha256(await readFile(dart));
   const gitDigest = git === undefined ? undefined : sha256(await readFile(git));
   const activationBinding =
     dart === undefined || git === undefined
@@ -810,8 +998,9 @@ async function setupCommand(
           dart: { path: dart, digest: dartDigest },
           git: { path: git, digest: gitDigest },
           command: [dart, "mcp-server"],
+          packageTool: recipe,
         };
-  const setupPlan = createSetupPlan({
+  let setupPlan = createSetupPlan({
     schemaVersion: 1,
     root: actualRoot,
     projectFingerprint,
@@ -820,32 +1009,110 @@ async function setupCommand(
     mode: "apply",
     candidates,
     policyHash: sha256(canonicalJson(policy)),
-    inputHash: sha256(canonicalJson({ projectBinding, activationBinding })),
+    inputHash: sha256(
+      canonicalJson({
+        projectBinding,
+        activationBinding,
+        pubspec: await readFile(
+          join(context.root, "pubspec.yaml"),
+          "utf8",
+        ).catch(() => ""),
+        lockfile: await readFile(
+          join(context.root, "pubspec.lock"),
+          "utf8",
+        ).catch(() => ""),
+        packageConfig: await readFile(
+          join(context.root, ".dart_tool/package_config.json"),
+          "utf8",
+        ).catch(() => ""),
+        selectedSkills,
+      }),
+    ),
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
   });
-  const previousApproval = await readSetupApproval(context.root, context.env);
-  const recipeDigests = candidates.map((item) => item.recipeDigest).sort();
-  const approvalReusable =
-    previousApproval?.planId === setupPlan.planId &&
-    canonicalJson([...previousApproval.approvedRecipeDigests].sort()) ===
-      canonicalJson(recipeDigests) &&
-    Date.parse(previousApproval.expiresAt) > now.getTime();
   const installer =
     dart === undefined || git === undefined
       ? undefined
       : context.installerFactory(dart, git);
   const harnessPlan = await adapter.planInstall(context.root, resolution.plan);
+  const installerPlan =
+    installer === undefined
+      ? undefined
+      : await installer.plan(context.root, recipe);
+  if (installerPlan && hasErrors(installerPlan.diagnostics))
+    throw new CliError(
+      "setup.install-plan-invalid",
+      installerPlan.diagnostics.map((item) => item.message).join("; "),
+    );
+  const {
+    planId: _basePlanId,
+    inputHash: baseInputHash,
+    ...basePlan
+  } = setupPlan;
+  setupPlan = createSetupPlan({
+    ...basePlan,
+    inputHash: sha256(
+      canonicalJson({
+        baseInputHash,
+        installerPlan:
+          installerPlan === undefined
+            ? null
+            : {
+                recipeDigest: installerPlan.recipeDigest,
+                executionRequired: installerPlan.executionRequired,
+                mutations: installerPlan.mutations.map((item) => ({
+                  kind: item.kind,
+                  path: item.path,
+                  ...(item.content === undefined
+                    ? {}
+                    : { contentHash: sha256(item.content) }),
+                  ...(item.expectedHash === undefined
+                    ? {}
+                    : { expectedHash: item.expectedHash }),
+                })),
+                process: installerPlan.process,
+                ...(installerPlan.compileProcess === undefined
+                  ? {}
+                  : { compileProcess: installerPlan.compileProcess }),
+                ...(installerPlan.skillsProcess === undefined
+                  ? {}
+                  : { skillsProcess: installerPlan.skillsProcess }),
+              },
+        harnessMutations: harnessPlan.mutations.map((item) => ({
+          kind: item.kind,
+          path: item.path,
+          ...(item.content === undefined
+            ? {}
+            : { contentHash: sha256(item.content) }),
+          ...(item.expectedHash === undefined
+            ? {}
+            : { expectedHash: item.expectedHash }),
+        })),
+      }),
+    ),
+  });
+  const previousApproval = await readSetupApproval(context.root, context.env);
+  const recipeDigests = candidates.map((item) => item.recipeDigest).sort();
+  const approvalReusable =
+    previousApproval !== undefined &&
+    (previousApproval.planId === setupPlan.planId ||
+      ((installerPlan?.mutations.length ?? 0) === 0 &&
+        installerPlan?.executionRequired !== true &&
+        harnessPlan.mutations.length === 0)) &&
+    canonicalJson([...previousApproval.approvedRecipeDigests].sort()) ===
+      canonicalJson(recipeDigests) &&
+    Date.parse(previousApproval.expiresAt) > now.getTime();
   const dryRun = flag(parsed, "dry-run");
   printLines(context.stdout, [
     dryRun ? "Setup preview" : "Setup",
     `  plan             ${setupPlan.planId}`,
     `  harness          ${adapter.id}`,
     `  capabilities     ${selected.join(", ") || "none"}`,
-    `  source           flutter/agent-plugins@${FLUTTER_AGENT_PLUGINS_RECIPE.commit}`,
-    `  activation       ${dart ?? "none"} mcp-server`,
-    `  skill paths      .agents/skills/{22 pinned Flutter and Dart skills}`,
-    `  external files   ${candidates.length > 0 ? "up to 24" : "0"}`,
+    "  source           dart_pubdev_mcp@0.9.0 + skills@1.0.0",
+    `  activation       ${dart ?? "none"} mcp-server + dart-pubdev-explorer`,
+    `  skill paths      ${selectedSkills.length} explicitly selected under .agents/skills`,
+    `  installer files  ${installerPlan?.mutations.length ?? 0}`,
     `  harness changes  ${harnessPlan.mutations.length}`,
     `  approval         ${approvalReusable ? "reused" : "required once"}`,
   ]);
@@ -870,18 +1137,12 @@ async function setupCommand(
   )
     throw new CliError(
       "setup.executable-drift",
-      "Git or Dart changed after setup review; generate a new setup command",
-    );
-  const installerPlan =
-    installer === undefined ? undefined : await installer.plan(context.root);
-  if (installerPlan && hasErrors(installerPlan.diagnostics))
-    throw new CliError(
-      "setup.install-plan-invalid",
-      installerPlan.diagnostics.map((item) => item.message).join("; "),
+      "Dart or Git changed after setup review; generate a new setup command",
     );
   if (
     approvalReusable &&
     (installerPlan?.mutations.length ?? 0) === 0 &&
+    installerPlan?.executionRequired !== true &&
     harnessPlan.mutations.length === 0
   ) {
     printLines(context.stdout, ["Setup complete", "  no changes"]);
@@ -896,8 +1157,9 @@ async function setupCommand(
     join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
     transaction,
   );
-  let installerChanged = false;
+  let installerRollback: InstallerRollbackToken | undefined;
   let harnessChanged = false;
+  let harnessRollback: HarnessPreimage[] = [];
   try {
     if (installer && installerPlan) {
       const result = await installer.apply(installerPlan);
@@ -905,8 +1167,9 @@ async function setupCommand(
         throw new Error(
           result.diagnostics.map((item) => item.message).join("; "),
         );
-      installerChanged = result.changed.length > 0;
+      installerRollback = result.rollbackToken;
     }
+    harnessRollback = await harnessPreimages(context.root, harnessPlan);
     const harnessResult = await adapter.apply(harnessPlan);
     if (hasErrors(harnessResult.diagnostics))
       throw new Error(
@@ -960,11 +1223,37 @@ async function setupCommand(
         },
       }),
     );
+    if (installerRollback !== undefined) {
+      if (installer?.commit === undefined)
+        throw new Error("Installer rollback commit is unavailable");
+      const commitDiagnostics = await installer.commit(installerRollback);
+      if (hasErrors(commitDiagnostics))
+        throw new Error(
+          commitDiagnostics.map(({ message }) => message).join("; "),
+        );
+      installerRollback = undefined;
+    }
   } catch (cause) {
-    if (harnessChanged && !harnessState.installed)
-      await adapter.uninstallOwned(context.root).catch(() => undefined);
-    if (installerChanged && installer)
-      await installer.uninstall(context.root).catch(() => undefined);
+    const rollbackErrors: string[] = [];
+    if (harnessChanged)
+      rollbackErrors.push(
+        ...(await restoreHarnessPreimages(context.root, harnessRollback)),
+      );
+    if (installerRollback !== undefined && installer) {
+      try {
+        if (installer.rollback === undefined)
+          throw new Error("Installer rollback is unavailable");
+        const result = await installer.rollback(installerRollback);
+        rollbackErrors.push(
+          ...result.diagnostics
+            .filter(({ level }) => level === "error")
+            .map(({ message }) => message),
+        );
+      } catch (rollbackCause) {
+        rollbackErrors.push(message(rollbackCause));
+      }
+    }
+    const failure = [message(cause), ...rollbackErrors].join("; ");
     const finishedAt = context.now().toISOString();
     await writeJsonAtomic(
       join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
@@ -983,12 +1272,13 @@ async function setupCommand(
             candidateId: item.id,
             recipeDigest: item.recipeDigest,
             status: "failed",
-            error: message(cause),
+            error: failure,
           })),
         },
       }),
     ).catch(() => undefined);
-    throw cause;
+    if (rollbackErrors.length === 0) throw cause;
+    throw new Error(failure, { cause });
   }
   printLines(context.stdout, [
     "Setup complete",

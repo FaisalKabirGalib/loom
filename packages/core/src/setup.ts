@@ -17,6 +17,13 @@ const httpsUrlSchema = z.url({
   hostname: z.regexes.domain,
 });
 const capabilitySet = new Set<string>(ALL_CAPABILITIES);
+const selectedSkillIntentSchema = z
+  .object({
+    id: textSchema.max(300),
+    reason: textSchema.max(2_000),
+    bindingHash: sha256Schema,
+  })
+  .strict();
 const canonicalRootSchema = z
   .string()
   .refine(
@@ -48,8 +55,30 @@ export const setupIntentSchema = z
       .refine((values) => new Set(values).size === values.length, {
         message: "Capabilities must be unique",
       }),
+    selectedSkills: z.array(selectedSkillIntentSchema).max(100),
+    selectionRationale: textSchema.max(4_096).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((intent, context) => {
+    if (
+      new Set(intent.selectedSkills.map(({ id }) => id)).size !==
+      intent.selectedSkills.length
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["selectedSkills"],
+        message: "Selected skill ids must be unique",
+      });
+    if (
+      intent.selectedSkills.length === 0 &&
+      intent.selectionRationale === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["selectionRationale"],
+        message: "Choosing zero skills requires a rationale",
+      });
+  });
 
 const npmRecipeSchema = z
   .object({
@@ -97,12 +126,74 @@ const remoteMcpRecipeSchema = z
   })
   .strict();
 
+const packageSkillBindingSchema = z
+  .object({
+    source: z.literal("hosted-package"),
+    id: textSchema.max(300),
+    reason: textSchema.max(2_000),
+    package: identifierSchema,
+    version: textSchema.max(100),
+    packageContentHash: sha256Schema,
+    archiveHash: sha256Schema,
+    path: textSchema.regex(/^skills\/[a-z0-9][a-z0-9._-]+$/u),
+    contentHash: sha256Schema,
+  })
+  .strict();
+
+const registrySkillBindingSchema = z
+  .object({
+    source: z.literal("skills-registry"),
+    id: textSchema.max(300),
+    reason: textSchema.max(2_000),
+    repository: httpsUrlSchema,
+    commit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u),
+    path: textSchema.regex(/^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\0]+$/u),
+    contentHash: sha256Schema,
+  })
+  .strict();
+
+const flutterPackageIntelligenceRecipeSchema = z
+  .object({
+    kind: z.literal("flutter-package-intelligence"),
+    toolPath: z.literal(".loom/tools/flutter-package-intelligence"),
+    dartPubdevMcp: z
+      .object({ version: z.literal("0.9.0"), contentHash: sha256Schema })
+      .strict(),
+    skillsCli: z
+      .object({ version: z.literal("1.0.0"), contentHash: sha256Schema })
+      .strict(),
+    pubspecHash: sha256Schema,
+    lockfileHash: sha256Schema,
+    selectedSkills: z
+      .array(
+        z.discriminatedUnion("source", [
+          packageSkillBindingSchema,
+          registrySkillBindingSchema,
+        ]),
+      )
+      .max(100),
+    selectionRationale: textSchema.max(4_096).optional(),
+  })
+  .strict()
+  .superRefine((recipe, context) => {
+    if (
+      recipe.selectedSkills.length === 0 &&
+      recipe.selectionRationale === undefined
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["selectionRationale"],
+        message: "Choosing zero skills requires a rationale",
+      });
+  });
+
 export const installRecipeSchema = z.discriminatedUnion("kind", [
   npmRecipeSchema,
   gitSkillRecipeSchema,
   binaryRecipeSchema,
   ociRecipeSchema,
   remoteMcpRecipeSchema,
+  flutterPackageIntelligenceRecipeSchema,
 ]);
 
 const setupCandidateShapeSchema = z

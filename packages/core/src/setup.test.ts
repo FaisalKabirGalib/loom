@@ -21,6 +21,8 @@ const intent: SetupIntent = {
   task: "Inspect this project",
   mode: "plan",
   requestedCapabilities: ["CODE_CONTEXT.semantic-search"],
+  selectedSkills: [],
+  selectionRationale: "No skill applies to this test",
 };
 
 const recipe: InstallRecipe = {
@@ -74,6 +76,13 @@ describe("setup intent", () => {
   );
 
   it("rejects unknown capabilities and malformed encodings", () => {
+    expect(
+      setupIntentSchema.safeParse({
+        ...intent,
+        selectedSkills: [],
+        selectionRationale: undefined,
+      }).success,
+    ).toBe(false);
     expect(
       setupIntentSchema.safeParse({
         ...intent,

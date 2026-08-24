@@ -105,6 +105,7 @@ export const parseSkillsOutput = (output: string): SkillRecord[] => {
         : undefined;
     if (!Array.isArray(values)) return [];
     return values
+      .slice(0, 1_000)
       .map(fromJsonItem)
       .filter((value): value is SkillRecord => value !== null);
   } catch {
@@ -112,6 +113,7 @@ export const parseSkillsOutput = (output: string): SkillRecord[] => {
       /^\s*(?:[│├└─*•>]\s*)?([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+)(?:\s+(\d+(?:\.\d+)?[kKmM]?)\s+installs?)?\s*$/u;
     return clean
       .split(/\r?\n/u)
+      .slice(0, 1_000)
       .map((line) => line.match(textLine))
       .filter((match): match is RegExpMatchArray => match !== null)
       .map((match) =>

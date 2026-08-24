@@ -2,6 +2,15 @@
 .codex/
 .loom/
 .opencode/
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.mcp.json
+AGENTS.md
+GEMINI.md
+docs/CODEBASE_WALKTHROUGH.md
 AGENT_WORKBENCH_ONE_SHOT_PROMPT.md
 opencode.json
+opencode.jsonc
 pnpm-lock.yaml

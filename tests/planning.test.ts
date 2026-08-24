@@ -8,7 +8,7 @@ const fixtures = join(import.meta.dirname, "..", "fixtures");
 describe("fixture capability plans", () => {
   for (const [name, selected] of [
     ["nextjs", []],
-    ["flutter", ["builtin:flutter-agent-plugins"]],
+    ["flutter", ["builtin:flutter-package-intelligence"]],
     ["react-native", ["builtin:callstack-rn-skills"]],
     ["expo", ["builtin:expo-skills"]],
     ["go", ["builtin:gopls-mcp"]],
