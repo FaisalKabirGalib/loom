@@ -4,6 +4,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
+  chmod,
   lstat,
   mkdir,
   readFile,
@@ -121,6 +122,7 @@ export interface RunCliOptions {
     name: string,
     environment: NodeJS.ProcessEnv,
   ) => Promise<string | undefined>;
+  afterSetupMetadataWrite?: () => Promise<void>;
 }
 
 interface SetupInstaller {
@@ -150,6 +152,59 @@ interface HarnessPreimage {
   previous?: Buffer;
   mode?: number;
   intended?: Buffer;
+}
+
+interface MetadataPreimage {
+  path: string;
+  previous?: Buffer;
+  mode?: number;
+}
+
+async function metadataPreimages(
+  paths: readonly string[],
+): Promise<MetadataPreimage[]> {
+  return Promise.all(
+    [...new Set(paths)].map(async (path) => {
+      const state = await lstat(path).catch((cause: NodeJS.ErrnoException) => {
+        if (cause.code === "ENOENT") return undefined;
+        throw cause;
+      });
+      if (state === undefined) return { path };
+      if (!state.isFile() || state.isSymbolicLink())
+        throw new Error("Setup metadata path is unsafe");
+      return {
+        path,
+        previous: await readFile(path),
+        mode: state.mode & 0o777,
+      };
+    }),
+  );
+}
+
+async function restoreMetadataPreimages(
+  preimages: readonly MetadataPreimage[],
+): Promise<string[]> {
+  const failures: string[] = [];
+  for (const preimage of [...preimages].reverse())
+    try {
+      if (preimage.previous === undefined)
+        await rm(preimage.path, { force: true });
+      else {
+        const temporary = `${preimage.path}.${randomBytes(16).toString("hex")}.tmp`;
+        try {
+          await writeFile(temporary, preimage.previous, {
+            mode: preimage.mode ?? 0o600,
+          });
+          await rename(temporary, preimage.path);
+          await chmod(preimage.path, preimage.mode ?? 0o600);
+        } finally {
+          await rm(temporary, { force: true });
+        }
+      }
+    } catch {
+      failures.push(preimage.path);
+    }
+  return failures;
 }
 
 async function assertHarnessPath(root: string, path: string): Promise<void> {
@@ -259,6 +314,7 @@ interface CommandContext {
     name: string,
     environment: NodeJS.ProcessEnv,
   ) => Promise<string | undefined>;
+  afterSetupMetadataWrite?: () => Promise<void>;
 }
 
 interface Envelope {
@@ -1149,17 +1205,10 @@ async function setupCommand(
     return 0;
   }
   const transaction = createSetupTransaction(setupPlan, now);
-  await writeJsonAtomic(
-    join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
-    setupPlan,
-  );
-  await writeJsonAtomic(
-    join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
-    transaction,
-  );
   let installerRollback: InstallerRollbackToken | undefined;
   let harnessChanged = false;
   let harnessRollback: HarnessPreimage[] = [];
+  let metadataRollback: MetadataPreimage[] = [];
   try {
     if (installer && installerPlan) {
       const result = await installer.apply(installerPlan);
@@ -1182,6 +1231,26 @@ async function setupCommand(
     ];
     if (hasErrors(verification))
       throw new Error(verification.map((item) => item.message).join("; "));
+    const loomState = resolveLoomPaths(context.env).state;
+    metadataRollback = await metadataPreimages([
+      ...Object.values(PROJECT_STATE_FILES).map((name) =>
+        join(context.root, STATE_DIRECTORY, name),
+      ),
+      join(loomState, "approval.key"),
+      join(
+        loomState,
+        "approvals",
+        `${sha256(resolve(context.root)).slice(7)}.json`,
+      ),
+    ]);
+    await writeJsonAtomic(
+      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
+      setupPlan,
+    );
+    await writeJsonAtomic(
+      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+      transaction,
+    );
     await writeState(context, adapter.id, resolution, selected);
     await writeJsonAtomic(
       join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
@@ -1223,6 +1292,7 @@ async function setupCommand(
         },
       }),
     );
+    await context.afterSetupMetadataWrite?.();
     if (installerRollback !== undefined) {
       if (installer?.commit === undefined)
         throw new Error("Installer rollback commit is unavailable");
@@ -1253,30 +1323,8 @@ async function setupCommand(
         rollbackErrors.push(message(rollbackCause));
       }
     }
+    rollbackErrors.push(...(await restoreMetadataPreimages(metadataRollback)));
     const failure = [message(cause), ...rollbackErrors].join("; ");
-    const finishedAt = context.now().toISOString();
-    await writeJsonAtomic(
-      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
-      setupTransactionSchema.parse({
-        ...transaction,
-        status: "failed",
-        updatedAt: finishedAt,
-        receipt: {
-          schemaVersion: 1,
-          transactionId: transaction.transactionId,
-          planId: setupPlan.planId,
-          status: "failed",
-          startedAt: transaction.createdAt,
-          finishedAt,
-          items: candidates.map((item) => ({
-            candidateId: item.id,
-            recipeDigest: item.recipeDigest,
-            status: "failed",
-            error: failure,
-          })),
-        },
-      }),
-    ).catch(() => undefined);
     if (rollbackErrors.length === 0) throw cause;
     throw new Error(failure, { cause });
   }
@@ -2002,6 +2050,9 @@ export async function runCli(
       options.installerFactory ??
       ((dartPath, gitPath) => new CapabilityInstaller({ dartPath, gitPath })),
     resolveExecutable: options.resolveExecutable ?? executablePath,
+    ...(options.afterSetupMetadataWrite === undefined
+      ? {}
+      : { afterSetupMetadataWrite: options.afterSetupMetadataWrite }),
   };
   let command = args[0] ?? "";
   try {

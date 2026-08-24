@@ -169,6 +169,23 @@ afterEach(async () => {
 });
 
 describe("CapabilityInstaller", () => {
+  it("refuses uninstall while an apply owns the transaction lock", async () => {
+    const { root, installer } = await fixture();
+    const plan = await installer.plan(root);
+    const applied = await installer.apply(plan);
+
+    expect(applied.rollbackToken).toBeDefined();
+    const uninstall = await installer.uninstall(root);
+    expect(uninstall.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "installers.transaction-locked" }),
+    );
+    expect(
+      await readFile(join(root, ".loom/setup-ownership.json"), "utf8"),
+    ).toContain("builtin:flutter-package-intelligence");
+
+    await installer.rollback(applied.rollbackToken!);
+  });
+
   it("plans the exact local package, two MCP pointers, and isolated pub get", async () => {
     const { root, installer, requests } = await fixture();
     const plan = await installer.plan(root);
@@ -227,7 +244,8 @@ describe("CapabilityInstaller", () => {
 
   it("owns the compiled runtime and refuses tampered no-op activation", async () => {
     const { root, installer } = await fixture();
-    await installer.apply(await installer.plan(root));
+    const initial = await installer.apply(await installer.plan(root));
+    await installer.commit(initial.rollbackToken!);
     const runtime = join(
       root,
       ".loom/tools/flutter-package-intelligence/.runtime/dart-pubdev-explorer",
@@ -263,7 +281,8 @@ describe("CapabilityInstaller", () => {
 
   it("restores generated state and the prior runtime after failed repair", async () => {
     const { root, installer, processRunner } = await fixture();
-    await installer.apply(await installer.plan(root));
+    const initial = await installer.apply(await installer.plan(root));
+    await installer.commit(initial.rollbackToken!);
     const toolRoot = join(root, ".loom/tools/flutter-package-intelligence");
     const runtime = join(toolRoot, ".runtime/dart-pubdev-explorer");
     const runtimeBefore = await readFile(runtime);
@@ -302,6 +321,7 @@ describe("CapabilityInstaller", () => {
     ).length;
 
     expect(first.diagnostics).toEqual([]);
+    await installer.commit(first.rollbackToken!);
     expect(
       requests.find(({ args }) => args[0] === "compile")?.args.at(-1),
     ).toBe(
@@ -324,7 +344,9 @@ describe("CapabilityInstaller", () => {
     expect(await installer.verify(root)).toEqual([]);
     const repeatedPlan = await installer.plan(root);
     expect(repeatedPlan.mutations).toEqual([]);
-    expect((await installer.apply(repeatedPlan)).changed).toEqual([]);
+    const repeated = await installer.apply(repeatedPlan);
+    expect(repeated.changed).toEqual([]);
+    await installer.commit(repeated.rollbackToken!);
     expect(
       requests.filter(
         ({ args }) => args.join(" ") === "pub get --enforce-lockfile",
@@ -337,9 +359,9 @@ describe("CapabilityInstaller", () => {
       ),
       "{}\n",
     );
-    expect((await installer.apply(await installer.plan(root))).changed).toEqual(
-      [],
-    );
+    const reactivated = await installer.apply(await installer.plan(root));
+    expect(reactivated.changed).toEqual([]);
+    await installer.commit(reactivated.rollbackToken!);
     expect(
       requests.filter(
         ({ args }) => args.join(" ") === "pub get --enforce-lockfile",
@@ -390,7 +412,8 @@ describe("CapabilityInstaller", () => {
 
   it("refuses to remove unknown files from the private tool directory", async () => {
     const { root, installer } = await fixture();
-    await installer.apply(await installer.plan(root));
+    const installed = await installer.apply(await installer.plan(root));
+    await installer.commit(installed.rollbackToken!);
     const userFile = join(
       root,
       ".loom/tools/flutter-package-intelligence/user-file.txt",
@@ -408,7 +431,8 @@ describe("CapabilityInstaller", () => {
 
   it("rejects forged ownership before uninstalling files", async () => {
     const { root, installer } = await fixture();
-    await installer.apply(await installer.plan(root));
+    const installed = await installer.apply(await installer.plan(root));
+    await installer.commit(installed.rollbackToken!);
     const ownershipPath = join(root, ".loom/setup-ownership.json");
     const ownership = JSON.parse(await readFile(ownershipPath, "utf8")) as {
       capabilities: Record<string, { recipeDigest: string }>;
@@ -434,7 +458,8 @@ describe("CapabilityInstaller", () => {
 
   it("refuses a self-consistent forged skill manifest after source authentication", async () => {
     const { root, installer } = await fixture();
-    await installer.apply(await installer.plan(root));
+    const initial = await installer.apply(await installer.plan(root));
+    await installer.commit(initial.rollbackToken!);
     const arbitraryPath = ".agents/skills/forged-skill/SKILL.md";
     const arbitrary = "arbitrary project file\n";
     const source = "authenticated source file\n";
@@ -621,6 +646,7 @@ describe("CapabilityInstaller", () => {
     const result = await installer.apply(await installer.plan(root, recipe));
 
     expect(result.diagnostics).toEqual([]);
+    await installer.commit(result.rollbackToken!);
     const skillsRequest = requests.find((request) =>
       request.args.includes("skills:skills"),
     );

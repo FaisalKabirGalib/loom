@@ -217,12 +217,90 @@ interface InstallerRollbackState {
     previousMode?: number;
     bytes: Buffer;
   };
+  lock: TransactionLock;
 }
 
 const OWNERSHIP_PATH = ".loom/setup-ownership.json";
+const TRANSACTION_LOCK_PATH = ".loom/.installer-transaction.lock";
 const CONFIG_PATHS = ["opencode.jsonc", "opencode.json"] as const;
 const RUNTIME_PATH = `${FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath}/.runtime/dart-pubdev-explorer${process.platform === "win32" ? ".exe" : ""}`;
 const RUNTIME_STAGED_PATH = `${FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath}/.runtime/.dart-pubdev-explorer.staged`;
+
+interface TransactionLock {
+  release(): Promise<void>;
+}
+
+const activeTransactionLocks = new Set<string>();
+
+async function acquireTransactionLock(root: string): Promise<TransactionLock> {
+  const projectRoot = resolve(root);
+  if (activeTransactionLocks.has(projectRoot))
+    throw new Error("Installer transaction is already active");
+  const lockPath = resolve(projectRoot, TRANSACTION_LOCK_PATH);
+  const loomPath = dirname(lockPath);
+  const loomExisted = await lstat(loomPath)
+    .then(() => true)
+    .catch((cause: NodeJS.ErrnoException) => {
+      if (cause.code === "ENOENT") return false;
+      throw cause;
+    });
+  await mkdir(loomPath, { recursive: true, mode: 0o700 });
+  await assertSafeDirectory(projectRoot, loomPath);
+  const owner = `${JSON.stringify({ pid: process.pid, nonce: randomUUID() })}\n`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      try {
+        await writeFile(join(lockPath, "owner.json"), owner, {
+          mode: 0o600,
+          flag: "wx",
+        });
+      } catch (cause) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw cause;
+      }
+      activeTransactionLocks.add(projectRoot);
+      return {
+        async release(): Promise<void> {
+          try {
+            const current = await readFile(
+              join(lockPath, "owner.json"),
+              "utf8",
+            );
+            if (current !== owner)
+              throw new Error("Installer transaction lock changed");
+            await rm(lockPath, { recursive: true, force: true });
+            if (!loomExisted) await rmdir(loomPath).catch(() => undefined);
+          } finally {
+            activeTransactionLocks.delete(projectRoot);
+          }
+        },
+      };
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+      const state = await lstat(lockPath).catch(() => undefined);
+      if (state === undefined || !state.isDirectory() || state.isSymbolicLink())
+        throw new Error("Installer transaction lock is unsafe");
+      const stale = await readFile(join(lockPath, "owner.json"), "utf8")
+        .then((content) => {
+          const value = JSON.parse(content) as { pid?: unknown };
+          if (!Number.isInteger(value.pid) || (value.pid as number) <= 0)
+            return false;
+          try {
+            process.kill(value.pid as number, 0);
+            return false;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code === "ESRCH";
+          }
+        })
+        .catch(() => false);
+      if (!stale || attempt === 1)
+        throw new Error("Installer transaction is already active");
+      await rm(lockPath, { recursive: true, force: true });
+    }
+  }
+  throw new Error("Installer transaction is already active");
+}
 
 const defaultRunner: ProcessRunner = (request) =>
   new Promise((done, reject) => {
@@ -1451,21 +1529,25 @@ export class CapabilityInstaller {
           issue("installers.invalid-rollback", "Rollback token is not active"),
         ],
       };
-    const failures = await this.#restore(state);
-    this.#rollbacks.delete(token);
-    return {
-      changed: [],
-      skipped: [],
-      diagnostics:
-        failures.length === 0
-          ? []
-          : [
-              issue(
-                "installers.rollback-failed",
-                `Rollback failed for ${failures.join(", ")}`,
-              ),
-            ],
-    };
+    try {
+      const failures = await this.#restore(state);
+      return {
+        changed: [],
+        skipped: [],
+        diagnostics:
+          failures.length === 0
+            ? []
+            : [
+                issue(
+                  "installers.rollback-failed",
+                  `Rollback failed for ${failures.join(", ")}`,
+                ),
+              ],
+      };
+    } finally {
+      this.#rollbacks.delete(token);
+      await state.lock.release().catch(() => undefined);
+    }
   }
 
   async commit(token: InstallerRollbackToken): Promise<InstallerDiagnostic[]> {
@@ -1477,6 +1559,7 @@ export class CapabilityInstaller {
     try {
       await rm(state.backupRoot, { recursive: true, force: true });
       this.#rollbacks.delete(token);
+      await state.lock.release().catch(() => undefined);
       return [];
     } catch (cause) {
       return [
@@ -1995,6 +2078,23 @@ export class CapabilityInstaller {
           ),
         ],
       };
+    let lock: TransactionLock;
+    try {
+      lock = await acquireTransactionLock(plan.root);
+    } catch (cause) {
+      return {
+        changed: [],
+        skipped: plan.mutations.map(({ path }) => path),
+        diagnostics: [
+          ...diagnostics,
+          issue(
+            "installers.transaction-locked",
+            cause instanceof Error ? cause.message : String(cause),
+            TRANSACTION_LOCK_PATH,
+          ),
+        ],
+      };
+    }
     const pending: AppliedMutation[] = [];
     for (const item of plan.mutations) {
       const relativePath = relative(plan.root, item.path).split(sep).join("/");
@@ -2042,20 +2142,26 @@ export class CapabilityInstaller {
               }),
         });
     }
-    if (diagnostics.some(({ level }) => level === "error"))
+    if (diagnostics.some(({ level }) => level === "error")) {
+      await lock.release().catch(() => undefined);
       return {
         changed: [],
         skipped: plan.mutations.map(({ path }) => path),
         diagnostics,
       };
-    if (dryRun)
+    }
+    if (dryRun) {
+      await lock.release().catch(() => undefined);
       return {
         changed: pending.map(({ mutation: item }) => item.path),
         skipped: [],
         diagnostics,
       };
-    if (pending.length === 0 && !plan.executionRequired)
+    }
+    if (pending.length === 0 && !plan.executionRequired) {
+      await lock.release().catch(() => undefined);
       return { changed: [], skipped: [], diagnostics };
+    }
     const ownershipEntry = pending.find(
       ({ relative: path }) => path === OWNERSHIP_PATH,
     );
@@ -2280,6 +2386,7 @@ export class CapabilityInstaller {
         backupRoot,
         effectsStarted,
         ...(installedRuntime === undefined ? {} : { installedRuntime }),
+        lock,
       });
       return {
         changed: [
@@ -2302,7 +2409,9 @@ export class CapabilityInstaller {
         backupRoot,
         effectsStarted,
         ...(installedRuntime === undefined ? {} : { installedRuntime }),
+        lock,
       });
+      await lock.release().catch(() => undefined);
       return {
         changed: [],
         skipped: plan.mutations.map(({ path }) => path),
@@ -2375,6 +2484,33 @@ export class CapabilityInstaller {
 
   async uninstall(root: string, dryRun = false): Promise<InstallerResult> {
     const projectRoot = resolve(root);
+    let lock: TransactionLock;
+    try {
+      lock = await acquireTransactionLock(projectRoot);
+    } catch (cause) {
+      return {
+        changed: [],
+        skipped: [],
+        diagnostics: [
+          issue(
+            "installers.transaction-locked",
+            cause instanceof Error ? cause.message : String(cause),
+            TRANSACTION_LOCK_PATH,
+          ),
+        ],
+      };
+    }
+    try {
+      return await this.#uninstallLocked(projectRoot, dryRun);
+    } finally {
+      await lock.release().catch(() => undefined);
+    }
+  }
+
+  async #uninstallLocked(
+    projectRoot: string,
+    dryRun: boolean,
+  ): Promise<InstallerResult> {
     const state = await readOwnership(projectRoot);
     const owned = state.current ?? state.legacy;
     if (!owned)
