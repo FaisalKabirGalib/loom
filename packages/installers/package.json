@@ -1,5 +1,5 @@
 {
-  "name": "@loom/mcp",
+  "name": "@loom/installers",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -10,10 +10,6 @@
     }
   },
   "dependencies": {
-    "@loom/core": "workspace:*",
-    "@loom/profiles": "workspace:*",
-    "@loom/registry": "workspace:*",
-    "@modelcontextprotocol/sdk": "1.30.0",
-    "zod": "4.4.3"
+    "jsonc-parser": "3.3.1"
   }
 }

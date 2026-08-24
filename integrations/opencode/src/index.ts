@@ -50,6 +50,10 @@ export const LoomPlugin = (async () => ({
       description: "Run the Loom verification loop",
       template: "Use the loom-verification-loop skill for this request: $ARGUMENTS",
     };
+    config.command["loom:setup"] ??= {
+      description: "Recommend a complete project setup with Loom",
+      template: "Use the loom-project-setup skill for this request: $ARGUMENTS",
+    };
   },
 })) satisfies Plugin;
 `;

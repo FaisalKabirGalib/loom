@@ -1,6 +1,6 @@
 {
   "name": "@loom/cli",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -17,6 +17,7 @@
     "@loom/claude": "workspace:*",
     "@loom/codex": "workspace:*",
     "@loom/core": "workspace:*",
+    "@loom/installers": "workspace:*",
     "@loom/mcp": "workspace:*",
     "@loom/opencode": "workspace:*",
     "@loom/omp": "workspace:*",

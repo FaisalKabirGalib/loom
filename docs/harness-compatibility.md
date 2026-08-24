@@ -42,7 +42,7 @@ but Codex project trust remains an external activation requirement. See the
 [Antigravity adapter](../integrations/antigravity/src/index.ts), and
 [integration ADR](adr/0003-harness-integration.md).
 
-Loom configures only its own eight-tool stdio MCP server and seven bundled,
+Loom connects its own nine-tool stdio MCP server and eight bundled,
 instruction-only skills. Capability plans and registry discovery do not trigger
 external installation.
 

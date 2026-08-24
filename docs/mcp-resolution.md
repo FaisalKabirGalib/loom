@@ -6,7 +6,7 @@ for a project.
 ## Loom MCP server
 
 `loom mcp` runs a stdio server named `loom` at the current Loom version. It
-exposes exactly eight tools, all annotated read-only, non-destructive,
+exposes exactly nine tools, all annotated read-only, non-destructive,
 idempotent, and closed-world:
 
 | Tool                      | Result                                                                 |
@@ -19,11 +19,12 @@ idempotent, and closed-world:
 | `loom_capability_status`  | Validated, redacted capability lock state.                             |
 | `loom_workflow_status`    | Redacted workflow state.                                               |
 | `loom_doctor`             | Local project/state diagnostics.                                       |
+| `loom_setup_recommend`    | Project-bound setup intent and one exact CLI command.                  |
 
 Tool names and registration are in
 [`packages/mcp/src/server.ts`](../packages/mcp/src/server.ts); behavior and
 input schemas are in [`handlers.ts`](../packages/mcp/src/handlers.ts). SDK
-transport tests assert that exactly these eight tools initialize and can be
+transport tests assert that exactly these nine tools initialize and can be
 called.
 
 ## Discovery
@@ -49,9 +50,10 @@ CLI does not currently expose an `--offline` flag.
 ## Selection is not installation
 
 Registry data is normalized, scored, and policy checked. Official Registry
-publication is explicitly not treated as a quality endorsement. A Loom apply
-configures only the Loom MCP server in the selected harness; it never downloads,
-executes, or configures a discovered external MCP candidate.
+publication is explicitly not treated as a quality endorsement. `loom connect`
+configures only Loom. `loom setup` can activate an external MCP only when Loom
+contains an audited immutable typed recipe; discovery results without one remain
+recommendations.
 
 The Official MCP Registry adapter has mocked API contract tests. Live search and
 two resumable cache checkpoints totaling 2,000 candidates were smoke-verified on

@@ -10,9 +10,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { detectProject } from "@loom/core";
+import {
+  canonicalJson,
+  detectProject,
+  encodeSetupIntent,
+  sha256,
+} from "@loom/core";
 
-import { runCli } from "./index.js";
+import { runCli, type RunCliOptions } from "./index.js";
 
 class BufferWriter {
   value = "";
@@ -44,9 +49,19 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+function setupFingerprint(root: string): string {
+  const {
+    detectionSignals: _detectionSignals,
+    existingAgentConfigs: _existingAgentConfigs,
+    ...binding
+  } = detectProject(root);
+  return sha256(canonicalJson(binding));
+}
+
 async function invoke(
   root: string,
   args: string[],
+  options: RunCliOptions = {},
 ): Promise<{
   code: number;
   stdout: string;
@@ -55,7 +70,15 @@ async function invoke(
   const stdout = new BufferWriter();
   const stderr = new BufferWriter();
   const code = await runCli(args, {
+    ...options,
     cwd: root,
+    env:
+      options.env ??
+      ({
+        ...process.env,
+        HOME: root,
+        XDG_STATE_HOME: join(root, ".user-state"),
+      } satisfies NodeJS.ProcessEnv),
     stdout,
     stderr,
     now: () => new Date("2026-01-02T03:04:05.000Z"),
@@ -86,13 +109,13 @@ describe("runCli", () => {
     expect(planned.code).toBe(0);
     expect(detection).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.1",
+      version: "0.2.0",
       command: "detect",
       ok: true,
     });
     expect(plan).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.1",
+      version: "0.2.0",
       command: "plan",
       ok: true,
     });
@@ -114,6 +137,159 @@ describe("runCli", () => {
     expect(await exists(join(root, ".loom"))).toBe(false);
   });
 
+  it("connects Loom without external capability approval", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+
+    const connected = await invoke(root, ["connect", "--harness", "opencode"]);
+    const doctor = await invoke(root, ["doctor", "--harness", "opencode"]);
+
+    expect(connected.code).toBe(0);
+    expect(connected.stdout).toContain("Connect (opencode)");
+    expect(await exists(join(root, "opencode.json"))).toBe(true);
+    expect(doctor.code).toBe(0);
+    expect(doctor.stdout).toContain("installed yes");
+  });
+
+  it("runs one-confirmation setup and reuses the exact approval", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    const token = encodeSetupIntent({
+      schemaVersion: 1,
+      root,
+      projectFingerprint: setupFingerprint(root),
+      harness: "opencode",
+      mode: "apply",
+      task: "work on this Flutter app",
+      requestedCapabilities: [
+        "MOBILE.framework-analysis",
+        "MOBILE.framework-docs",
+        "MOBILE.runtime-inspection",
+      ],
+    });
+    let confirmations = 0;
+    const installer = {
+      async plan(projectRoot: string) {
+        return {
+          candidate: "builtin:flutter-agent-plugins" as const,
+          root: projectRoot,
+          recipeDigest: "a".repeat(64),
+          mutations: [],
+          diagnostics: [],
+        };
+      },
+      async apply() {
+        return { changed: [], skipped: [], diagnostics: [] };
+      },
+      async verify() {
+        return [];
+      },
+      async uninstall() {
+        return { changed: [], skipped: [], diagnostics: [] };
+      },
+    };
+    const options: RunCliOptions = {
+      isTTY: true,
+      confirm: async () => {
+        confirmations += 1;
+        return true;
+      },
+      installerFactory: () => installer,
+      resolveExecutable: async () => process.execPath,
+    };
+
+    expect(
+      (await invoke(root, ["connect", "--harness", "opencode"], options)).code,
+    ).toBe(0);
+    const first = await invoke(root, ["setup", "--intent", token], options);
+    const second = await invoke(root, ["setup", "--intent", token], options);
+    const transaction = JSON.parse(
+      await readFile(join(root, ".loom/setup-transaction.json"), "utf8"),
+    ) as { transactionId: string };
+    const listed = await invoke(root, ["transactions"], options);
+    const rolledBack = await invoke(
+      root,
+      ["rollback", transaction.transactionId],
+      options,
+    );
+
+    expect(first.code, first.stderr).toBe(0);
+    expect(first.stdout).toContain("Setup complete");
+    expect(second.code).toBe(0);
+    expect(second.stdout).toContain("approval         reused");
+    expect(confirmations).toBe(1);
+    expect(listed.stdout).toContain(transaction.transactionId);
+    expect(rolledBack.code).toBe(0);
+    expect(await exists(join(root, ".loom/setup-approval.json"))).toBe(false);
+    expect(await exists(join(root, ".loom/capabilities.lock.json"))).toBe(true);
+  });
+
+  it("refuses first-time setup outside an interactive terminal", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    const token = encodeSetupIntent({
+      schemaVersion: 1,
+      root,
+      projectFingerprint: setupFingerprint(root),
+      harness: "opencode",
+      mode: "apply",
+      requestedCapabilities: [
+        "MOBILE.framework-analysis",
+        "MOBILE.framework-docs",
+        "MOBILE.runtime-inspection",
+      ],
+    });
+    let installerPlans = 0;
+    const installer = {
+      async plan(projectRoot: string) {
+        installerPlans += 1;
+        return {
+          candidate: "builtin:flutter-agent-plugins" as const,
+          root: projectRoot,
+          recipeDigest: "a".repeat(64),
+          mutations: [],
+          diagnostics: [],
+        };
+      },
+      async apply() {
+        return { changed: [], skipped: [], diagnostics: [] };
+      },
+      async verify() {
+        return [];
+      },
+      async uninstall() {
+        return { changed: [], skipped: [], diagnostics: [] };
+      },
+    };
+
+    const options: RunCliOptions = {
+      isTTY: false,
+      installerFactory: () => installer,
+      resolveExecutable: async () => process.execPath,
+    };
+    expect(
+      (await invoke(root, ["connect", "--harness", "opencode"], options)).code,
+    ).toBe(0);
+    await writeFile(
+      join(root, ".loom/setup-approval.json"),
+      JSON.stringify({ planId: "forged", expiresAt: "2999-01-01T00:00:00Z" }),
+    );
+    const result = await invoke(root, ["setup", "--intent", token], options);
+
+    expect(result.code, result.stderr).toBe(3);
+    expect(result.stderr).toContain("setup.confirmation-required");
+    expect(installerPlans).toBe(0);
+  });
+
   it("treats missing state as normal before installation", async () => {
     const root = await fixture();
     const result = await invoke(root, ["doctor", "--harness", "opencode"]);
@@ -130,7 +306,7 @@ describe("runCli", () => {
       join(root, ".loom/project.json"),
       `${JSON.stringify({
         schemaVersion: 1,
-        version: "0.1.1",
+        version: "0.2.0",
         project: detectProject(root),
       })}\n`,
     );
@@ -205,7 +381,7 @@ describe("runCli", () => {
       JSON.parse(await readFile(join(root, ".loom/project.json"), "utf8")),
     ).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.1",
+      version: "0.2.0",
     });
     expect(await exists(join(root, ".loom/workflow.json"))).toBe(true);
     expect(await exists(join(root, ".loom/capabilities.lock.json"))).toBe(true);

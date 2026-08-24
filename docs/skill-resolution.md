@@ -37,8 +37,9 @@ project-scoped candidates with shell/network/write permissions and a script
 review note. Failed or malformed output produces no candidates.
 
 Discovery never invokes the `skills` install command and `loom apply` never
-installs discovered skills. Review and installation of an external skill remain
-outside Loom.
+installs arbitrary discovered skills. Only audited immutable typed recipes can
+enter setup; review and installation of other external skills remain outside
+Loom.
 
 The `skills` CLI integration has mocked parser/process tests, but its live live
 `skills@1.5.23 find typescript` discovery was smoke-verified on 2026-08-23.

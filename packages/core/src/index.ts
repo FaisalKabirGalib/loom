@@ -10,5 +10,6 @@ export * from "./policy.js";
 export * from "./resolver.js";
 export * from "./safety.js";
 export * from "./scoring.js";
+export * from "./setup.js";
 export * from "./state.js";
 export * from "./task.js";

@@ -10,6 +10,7 @@
     { "path": "../core" },
     { "path": "../profiles" },
     { "path": "../registry" },
+    { "path": "../installers" },
     { "path": "../mcp" },
     { "path": "../../integrations/opencode" },
     { "path": "../../integrations/codex" },

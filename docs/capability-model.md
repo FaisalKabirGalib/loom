@@ -56,5 +56,6 @@ entries remain optional.
 
 The lock contains only selected candidates with an exact version or revision.
 After policy and any explicit approval checks pass, CLI state marks selected
-entries `approved`; it does not install external candidates. See
-[ADR 0001](adr/0001-minimum-capability-resolver.md).
+entries `approved`. Setup advances only successfully installed and verified
+typed-recipe candidates to installed/active state; all others remain
+recommendations. See [ADR 0001](adr/0001-minimum-capability-resolver.md).

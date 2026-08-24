@@ -10,6 +10,7 @@ import {
   explainInputSchema,
   projectDetectInputSchema,
   projectPlanInputSchema,
+  setupRecommendInputSchema,
   statusInputSchema,
   type LoomMcpDependencies,
 } from "./handlers.js";
@@ -23,6 +24,7 @@ export const LOOM_TOOL_NAMES = [
   "loom_capability_status",
   "loom_workflow_status",
   "loom_doctor",
+  "loom_setup_recommend",
 ] as const;
 
 const outputSchema = z
@@ -121,6 +123,13 @@ export function createLoomMcpServer(
     "Diagnose project and Loom state without network access",
     statusInputSchema,
     handlers.doctor,
+  );
+  register(
+    "loom_setup_recommend",
+    "Recommend a setup command without mutation",
+    setupRecommendInputSchema,
+    handlers.setupRecommend,
+    true,
   );
   return server;
 }

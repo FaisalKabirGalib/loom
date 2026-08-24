@@ -26,4 +26,5 @@ TTL, stale fallback, offline, incremental pagination, deletion, and repeated
 cursor handling for paginated sources.
 
 No registry is connected to harness apply. Adding one must not create an
-external auto-install path.
+automatic installation path unless a separately reviewed immutable typed recipe
+and constrained installer are implemented.

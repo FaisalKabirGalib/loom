@@ -11,7 +11,8 @@ separate trust boundaries.
   access to read, and requires review for scripted skills.
 - Suspicious binaries, unresolved provenance, package/repository mismatch,
   unsafe installers, deleted entries, and below-minimum trust can be blocked.
-- Discovery is not installation. Loom has no external auto-install path.
+- Discovery is not installation. Only candidates with audited immutable typed
+  recipes can enter `loom setup`; all others remain recommendations.
 
 CLI and MCP planning layer `$XDG_CONFIG_HOME/loom/preferences.toml` (falling
 back to `~/.config/loom/preferences.toml`) and `.loom/policy.toml` over secure
@@ -33,6 +34,22 @@ OpenCode patches only `mcp.loom` while preserving JSONC comments and other keys.
 Codex appends/replaces only a marked `mcp_servers.loom` TOML block and preserves
 all bytes outside it. Shared skill files remain while another harness owns the
 same hash.
+
+## LLM-assisted setup
+
+- Loom MCP remains read-only. The host LLM can produce only a strict intent
+  token containing project identity, task, harness, and capability enums.
+- The CLI re-detects the project and rejects root, fingerprint, capability,
+  policy, recipe, version, or permission drift.
+- Install recipes contain fixed structured fields and execute argument arrays
+  with `shell: false`; LLM text and registry runtime hints are never executed.
+- Setup approvals are authenticated with a user-private machine key and stored
+  under the XDG state directory, outside the agent-writable project.
+- The initial OpenCode/Flutter recipe fetches an exact Git commit, copies only
+  22 top-level instruction-only skills, excludes hooks and scripts, and
+  activates the absolute Dart SDK MCP command.
+- Setup transactions record exact plan and recipe digests. Rollback removes only
+  setup-owned external resources and retains the Loom connection.
 
 ## State and output
 

@@ -8,6 +8,7 @@ import designDirector from "../packages/skills/loom-design-director/SKILL.md" wi
 import functionalCore from "../packages/skills/loom-functional-core/SKILL.md" with { type: "file" };
 import projectHydrate from "../packages/skills/loom-project-hydrate/SKILL.md" with { type: "file" };
 import projectStart from "../packages/skills/loom-project-start/SKILL.md" with { type: "file" };
+import projectSetup from "../packages/skills/loom-project-setup/SKILL.md" with { type: "file" };
 import verificationLoop from "../packages/skills/loom-verification-loop/SKILL.md" with { type: "file" };
 
 const skills = {
@@ -17,6 +18,7 @@ const skills = {
   "loom-functional-core": functionalCore,
   "loom-project-hydrate": projectHydrate,
   "loom-project-start": projectStart,
+  "loom-project-setup": projectSetup,
   "loom-verification-loop": verificationLoop,
 };
 

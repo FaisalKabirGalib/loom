@@ -17,9 +17,10 @@ ownership of every mutation.
 | `packages/core`            | Domain schemas, detection, task classification, scoring, policy, resolution, locks, paths, and harness contracts. |
 | `packages/profiles`        | Converts detected stacks into required and useful capability requirements.                                        |
 | `packages/registry`        | Built-in catalog, remote MCP/skill discovery, cache, and project planning orchestration.                          |
+| `packages/installers`      | Audited external recipes, staging, activation, ownership, verification, and rollback.                             |
 | `packages/cli`             | User-facing commands, output, state persistence, and harness selection.                                           |
-| `packages/mcp`             | Read-only stdio MCP server exposing Loom's eight tools.                                                           |
-| `packages/skills`          | Seven canonical, instruction-only Loom skills.                                                                    |
+| `packages/mcp`             | Read-only stdio MCP server exposing Loom's nine tools.                                                            |
+| `packages/skills`          | Eight canonical, instruction-only Loom skills.                                                                    |
 | `integrations/opencode`    | OpenCode config, plugin, skill, ownership, and uninstall adapter.                                                 |
 | `integrations/codex`       | Codex TOML, skill, ownership, and uninstall adapter.                                                              |
 | `integrations/claude`      | Claude Code MCP JSON, skill, ownership, and uninstall adapter.                                                    |
@@ -110,8 +111,9 @@ node packages/cli/dist/index.js doctor --harness opencode
 ```
 
 `loom mcp` starts the stdio server in `packages/mcp/src/server.ts`. It exposes
-exactly eight read-only tools for project detection, planning, explanation,
-capability search/resolution/status, workflow status, and diagnostics.
+exactly nine read-only tools for project detection, planning, setup
+recommendation, explanation, capability search/resolution/status, workflow
+status, and diagnostics.
 
 ## Development Workflow
 
@@ -131,6 +133,11 @@ pnpm exec vitest run packages/core/src/detection.test.ts
 `pnpm build:binaries` creates standalone cross-platform executables and
 `SHA256SUMS` under the ignored `release/` directory. Tagged `v*` pushes run the
 release workflow in `.github/workflows/release.yml`.
+
+The preferred project flow is `loom connect --harness opencode`, followed by a
+host-LLM call to `loom_setup_recommend` and one returned
+`loom setup --intent ...` command. The CLI, never the LLM or MCP server, owns
+installation and mutation authority.
 
 ## Common Changes
 

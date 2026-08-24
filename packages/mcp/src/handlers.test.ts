@@ -2,7 +2,11 @@ import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { detectProject, type CapabilityCandidate } from "@loom/core";
+import {
+  decodeSetupIntent,
+  detectProject,
+  type CapabilityCandidate,
+} from "@loom/core";
 import { BuiltinRegistry, type CapabilityRegistry } from "@loom/registry";
 import { describe, expect, it, vi } from "vitest";
 
@@ -92,5 +96,92 @@ describe("createLoomToolHandlers", () => {
       },
       workflow: null,
     });
+  });
+
+  it("recommends a deterministic, non-executable setup intent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-mcp-"));
+    const candidate = (await new BuiltinRegistry().resolve(
+      "context7",
+    )) as CapabilityCandidate;
+    const project = detectProject(root);
+    const task = {
+      summary: "Read current package documentation",
+      intents: ["documentation"],
+      requiredCapabilities: ["DOCS.api-reference"],
+      usefulCapabilities: ["DOCS.framework-docs"],
+      risk: "low" as const,
+    };
+    const selected = {
+      candidate,
+      score: 90,
+      reasons: ["Covers requested documentation"],
+      penalties: [],
+      coverage: [
+        "DOCS.framework-docs",
+        "DOCS.api-reference",
+        "DOCS.framework-docs",
+      ],
+      breakdown: {
+        taskFit: 1,
+        projectFit: 1,
+        coverage: 1,
+        maintenance: 1,
+        provenance: 1,
+        security: 1,
+        contextEfficiency: 1,
+        portability: 1,
+        penalties: 0,
+      },
+    };
+    const handlers = createLoomToolHandlers({
+      cwd: () => root,
+      networkRegistries: () => [],
+      planProject: vi.fn(async () => ({
+        project,
+        task,
+        candidates: [candidate],
+        plan: {
+          project,
+          task,
+          selected: [selected],
+          optional: [],
+          rejected: [],
+          uncovered: [],
+          requiredApprovals: [],
+        },
+      })),
+    });
+
+    const result = await handlers.setupRecommend({
+      task: "Read current package documentation",
+      harness: "opencode",
+    });
+    const intent = decodeSetupIntent(result.intent as string);
+
+    expect(intent).toMatchObject({
+      schemaVersion: 1,
+      mode: "apply",
+      harness: "opencode",
+      task: "Read current package documentation",
+    });
+    expect(intent.requestedCapabilities).toEqual([
+      "DOCS.api-reference",
+      "DOCS.framework-docs",
+    ]);
+    expect(result.command).toBe(`loom setup --intent ${result.intent}`);
+    expect(Object.keys(intent).sort()).toEqual(
+      [
+        "harness",
+        "mode",
+        "projectFingerprint",
+        "requestedCapabilities",
+        "root",
+        "schemaVersion",
+        "task",
+      ].sort(),
+    );
+    expect(JSON.stringify(intent)).not.toMatch(/https?:\/\//i);
+    expect(intent).not.toHaveProperty("recipe");
+    expect(intent).not.toHaveProperty("url");
   });
 });

@@ -4,6 +4,7 @@
     { "path": "packages/core" },
     { "path": "packages/profiles" },
     { "path": "packages/registry" },
+    { "path": "packages/installers" },
     { "path": "integrations/opencode" },
     { "path": "integrations/codex" },
     { "path": "integrations/claude" },

@@ -1,8 +1,19 @@
 #!/usr/bin/env node
 
-import { access, readFile, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
+import {
+  access,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInterface } from "node:readline/promises";
 
 import { AntigravityHarnessAdapter } from "@loom/antigravity";
 import { ClaudeHarnessAdapter } from "@loom/claude";
@@ -14,6 +25,11 @@ import {
   STATE_DIRECTORY,
   VERSION,
   createCapabilityLock,
+  createSetupPlan,
+  createSetupTransaction,
+  canonicalJson,
+  computeRecipeDigest,
+  decodeSetupIntent,
   detectProject,
   loadEffectivePolicy,
   capabilityLockSchema,
@@ -21,6 +37,11 @@ import {
   projectStateSchema,
   redactLockSecrets,
   redactSecrets,
+  setupApprovalSchema,
+  setupPlanSchema,
+  setupTransactionSchema,
+  sha256,
+  resolveLoomPaths,
   writeJsonAtomic,
   type CapabilityCandidate,
   type CapabilityPlan,
@@ -28,6 +49,10 @@ import {
   type HarnessAdapter,
   workflowStateSchema,
 } from "@loom/core";
+import {
+  CapabilityInstaller,
+  FLUTTER_AGENT_PLUGINS_RECIPE,
+} from "@loom/installers";
 import { OpenCodeHarnessAdapter } from "@loom/opencode";
 import { OmpHarnessAdapter } from "@loom/omp";
 import {
@@ -84,6 +109,26 @@ export interface RunCliOptions {
   stdout?: CliWriter;
   stderr?: CliWriter;
   now?: () => Date;
+  isTTY?: boolean;
+  confirm?: (prompt: string) => Promise<boolean>;
+  installerFactory?: (dartPath: string, gitPath: string) => SetupInstaller;
+  resolveExecutable?: (
+    name: string,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string | undefined>;
+}
+
+interface SetupInstaller {
+  plan(root: string): ReturnType<CapabilityInstaller["plan"]>;
+  apply(
+    plan: Awaited<ReturnType<CapabilityInstaller["plan"]>>,
+    dryRun?: boolean,
+  ): ReturnType<CapabilityInstaller["apply"]>;
+  verify(root: string): ReturnType<CapabilityInstaller["verify"]>;
+  uninstall(
+    root: string,
+    dryRun?: boolean,
+  ): ReturnType<CapabilityInstaller["uninstall"]>;
 }
 
 interface ParsedArguments {
@@ -97,6 +142,13 @@ interface CommandContext {
   stdout: CliWriter;
   stderr: CliWriter;
   now: () => Date;
+  isTTY: boolean;
+  confirm: (prompt: string) => Promise<boolean>;
+  installerFactory: (dartPath: string, gitPath: string) => SetupInstaller;
+  resolveExecutable: (
+    name: string,
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<string | undefined>;
 }
 
 interface Envelope {
@@ -127,6 +179,11 @@ Commands:
   explain
   discover mcp|skills <query>
   capabilities [--json]
+  connect [--dry-run] [--harness opencode|codex|claude|omp|antigravity]
+  setup --intent <loom1_token> [--dry-run]
+  transactions
+  rollback <transaction-id>
+  recover
   apply [--dry-run] [--harness opencode|codex|claude|omp|antigravity] [--task <text>] [--approve <id>]
   remove [--dry-run] [--harness opencode|codex|claude|omp|antigravity]
   doctor [--json] [--harness opencode|codex|claude|omp|antigravity]
@@ -138,7 +195,7 @@ Commands:
 function parseArguments(args: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
   const flags = new Map<string, string[]>();
-  const valueFlags = new Set(["approve", "harness", "task"]);
+  const valueFlags = new Set(["approve", "harness", "intent", "task"]);
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === undefined) continue;
@@ -492,6 +549,593 @@ function approvalError(
       );
 }
 
+async function connectCommand(
+  parsed: ParsedArguments,
+  context: CommandContext,
+): Promise<number> {
+  assertFlags(parsed, ["dry-run", "harness"]);
+  if (parsed.positionals.length !== 0) throw usageError();
+  const adapter = adapterFor(value(parsed, "harness"));
+  const resolution = await resolvePlan(context.root, undefined, context.env);
+  const mutationPlan = await adapter.planInstall(context.root, resolution.plan);
+  const result = await adapter.apply(mutationPlan, flag(parsed, "dry-run"));
+  printLines(context.stdout, [
+    flag(parsed, "dry-run")
+      ? `Connect preview (${adapter.id})`
+      : `Connect (${adapter.id})`,
+    `  changed ${result.changed.length}`,
+    `  skipped ${result.skipped.length}`,
+    ...result.diagnostics.map(
+      (item) => `  ${item.level} ${item.code}: ${item.message}`,
+    ),
+  ]);
+  return hasErrors(result.diagnostics) ? EXIT_ERROR : 0;
+}
+
+async function executablePath(
+  name: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  for (const directory of (environment.PATH ?? "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = resolve(directory, name);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return undefined;
+}
+
+async function readSetupApproval(
+  root: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<ReturnType<typeof setupApprovalSchema.parse> | undefined> {
+  const path = await setupApprovalPath(root, environment);
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as {
+      approval?: unknown;
+      mac?: unknown;
+    };
+    const approval = setupApprovalSchema.parse(value.approval);
+    if (typeof value.mac !== "string")
+      throw new Error("Invalid setup approval");
+    const expected = approvalMac(
+      await approvalKey(environment),
+      root,
+      approval,
+    );
+    const actualBytes = Buffer.from(value.mac, "hex");
+    const expectedBytes = Buffer.from(expected, "hex");
+    if (
+      actualBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(actualBytes, expectedBytes)
+    )
+      throw new Error("Setup approval authentication failed");
+    return approval;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw cause;
+  }
+}
+
+async function approvalKey(environment: NodeJS.ProcessEnv): Promise<Buffer> {
+  const state = resolveLoomPaths(environment).state;
+  await mkdir(state, { recursive: true, mode: 0o700 });
+  const info = await lstat(state);
+  if (!info.isDirectory() || info.isSymbolicLink())
+    throw new Error("Loom state directory is unsafe");
+  const path = join(state, "approval.key");
+  try {
+    await writeFile(path, randomBytes(32), { flag: "wx", mode: 0o600 });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+  }
+  const key = await readFile(path);
+  if (key.length !== 32) throw new Error("Invalid Loom approval key");
+  return key;
+}
+
+async function setupApprovalPath(
+  root: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const directory = join(resolveLoomPaths(environment).state, "approvals");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink())
+    throw new Error("Loom approval directory is unsafe");
+  return join(directory, `${sha256(resolve(root)).slice(7)}.json`);
+}
+
+function approvalMac(
+  key: Buffer,
+  root: string,
+  approval: ReturnType<typeof setupApprovalSchema.parse>,
+): string {
+  return createHmac("sha256", key)
+    .update(canonicalJson({ root: resolve(root), approval }))
+    .digest("hex");
+}
+
+async function writeSetupApproval(
+  root: string,
+  environment: NodeJS.ProcessEnv,
+  approval: ReturnType<typeof setupApprovalSchema.parse>,
+): Promise<void> {
+  const key = await approvalKey(environment);
+  await writeJsonAtomic(await setupApprovalPath(root, environment), {
+    approval,
+    mac: approvalMac(key, root, approval),
+  });
+}
+
+async function removeSetupApproval(
+  root: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  await rm(await setupApprovalPath(root, environment), { force: true });
+}
+
+async function assertSafeSetupState(root: string): Promise<void> {
+  const directory = join(root, STATE_DIRECTORY);
+  try {
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw new Error("Project .loom state directory is unsafe");
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    await mkdir(directory, { mode: 0o700 });
+  }
+}
+
+async function setupCommand(
+  parsed: ParsedArguments,
+  context: CommandContext,
+): Promise<number> {
+  assertFlags(parsed, ["dry-run", "intent"]);
+  if (parsed.positionals.length !== 0) throw usageError();
+  const encoded = value(parsed, "intent");
+  if (encoded === undefined)
+    throw new CliError(
+      "setup.intent-required",
+      "--intent is required",
+      EXIT_USAGE,
+    );
+  const intent = decodeSetupIntent(encoded);
+  if (intent.mode !== "apply")
+    throw new CliError("setup.invalid-mode", "Setup intent is not applicable");
+  if (intent.harness !== "opencode")
+    throw new CliError(
+      "setup.unsupported-harness",
+      "The first audited setup recipe supports OpenCode only",
+    );
+  await assertSafeSetupState(context.root);
+  const actualRoot = await realpath(context.root);
+  if (intent.root !== actualRoot)
+    throw new CliError(
+      "setup.intent-root-mismatch",
+      "The setup command was generated for a different project root",
+    );
+  const adapter = adapterFor(intent.harness);
+  const harnessState = await adapter.inspect(context.root);
+  if (!harnessState.installed)
+    throw new CliError(
+      "setup.not-connected",
+      "Run loom connect --harness opencode and restart OpenCode before setup",
+    );
+  const policy = await loadEffectivePolicy(context.root, context.env);
+  const resolution = await planProject(context.root, {
+    ...(intent.task === undefined ? {} : { task: intent.task }),
+    policy,
+  });
+  if (resolution.plan.uncovered.length > 0)
+    throw new CliError(
+      "plan.uncovered",
+      `Required capabilities are uncovered: ${resolution.plan.uncovered.join(", ")}`,
+    );
+  const selected = resolution.plan.selected.map((item) => item.candidate.id);
+  const resolvedCapabilities = [
+    ...new Set(resolution.plan.selected.flatMap((item) => item.coverage)),
+  ].sort();
+  if (
+    canonicalJson([...intent.requestedCapabilities].sort()) !==
+    canonicalJson(resolvedCapabilities)
+  )
+    throw new CliError(
+      "setup.intent-stale",
+      "The generated setup intent no longer matches the resolved capabilities",
+    );
+  const unsupported = selected.filter(
+    (id) => id !== FLUTTER_AGENT_PLUGINS_RECIPE.candidate,
+  );
+  if (unsupported.length > 0)
+    throw new CliError(
+      "setup.recipe-unavailable",
+      `No audited install recipe is available for: ${unsupported.join(", ")}`,
+    );
+  const recipe = {
+    kind: "git-skill" as const,
+    repository: FLUTTER_AGENT_PLUGINS_RECIPE.repository,
+    commit: FLUTTER_AGENT_PLUGINS_RECIPE.commit,
+    path: FLUTTER_AGENT_PLUGINS_RECIPE.sourcePath,
+  };
+  const candidates = resolution.plan.selected.map((item) => ({
+    id: item.candidate.id,
+    capabilities: [...item.coverage].sort(),
+    recipe,
+    recipeDigest: computeRecipeDigest(recipe),
+  }));
+  const {
+    detectionSignals: _detectionSignals,
+    existingAgentConfigs: _existingAgentConfigs,
+    ...projectBinding
+  } = resolution.project;
+  const projectFingerprint = sha256(canonicalJson(projectBinding));
+  if (intent.projectFingerprint !== projectFingerprint)
+    throw new CliError(
+      "setup.intent-stale",
+      "The project changed after this setup command was generated",
+    );
+  const now = context.now();
+  const safeTask =
+    intent.task === undefined ? undefined : String(safe(intent.task));
+  const dart =
+    candidates.length === 0
+      ? undefined
+      : await context.resolveExecutable("dart", context.env);
+  if (candidates.length > 0 && dart === undefined)
+    throw new CliError(
+      "setup.dart-unavailable",
+      "The audited Flutter recipe requires an executable dart SDK on PATH",
+    );
+  const git =
+    candidates.length === 0
+      ? undefined
+      : await context.resolveExecutable("git", context.env);
+  if (candidates.length > 0 && git === undefined)
+    throw new CliError(
+      "setup.git-unavailable",
+      "The audited Flutter recipe requires an executable git on PATH",
+    );
+  const dartDigest =
+    dart === undefined ? undefined : sha256(await readFile(dart));
+  const gitDigest = git === undefined ? undefined : sha256(await readFile(git));
+  const activationBinding =
+    dart === undefined || git === undefined
+      ? { loomVersion: VERSION }
+      : {
+          loomVersion: VERSION,
+          installerVersion: VERSION,
+          dart: { path: dart, digest: dartDigest },
+          git: { path: git, digest: gitDigest },
+          command: [dart, "mcp-server"],
+        };
+  const setupPlan = createSetupPlan({
+    schemaVersion: 1,
+    root: actualRoot,
+    projectFingerprint,
+    harness: adapter.id,
+    ...(safeTask === undefined ? {} : { task: safeTask }),
+    mode: "apply",
+    candidates,
+    policyHash: sha256(canonicalJson(policy)),
+    inputHash: sha256(canonicalJson({ projectBinding, activationBinding })),
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
+  });
+  const previousApproval = await readSetupApproval(context.root, context.env);
+  const recipeDigests = candidates.map((item) => item.recipeDigest).sort();
+  const approvalReusable =
+    previousApproval?.planId === setupPlan.planId &&
+    canonicalJson([...previousApproval.approvedRecipeDigests].sort()) ===
+      canonicalJson(recipeDigests) &&
+    Date.parse(previousApproval.expiresAt) > now.getTime();
+  const installer =
+    dart === undefined || git === undefined
+      ? undefined
+      : context.installerFactory(dart, git);
+  const harnessPlan = await adapter.planInstall(context.root, resolution.plan);
+  const dryRun = flag(parsed, "dry-run");
+  printLines(context.stdout, [
+    dryRun ? "Setup preview" : "Setup",
+    `  plan             ${setupPlan.planId}`,
+    `  harness          ${adapter.id}`,
+    `  capabilities     ${selected.join(", ") || "none"}`,
+    `  source           flutter/agent-plugins@${FLUTTER_AGENT_PLUGINS_RECIPE.commit}`,
+    `  activation       ${dart ?? "none"} mcp-server`,
+    `  skill paths      .agents/skills/{22 pinned Flutter and Dart skills}`,
+    `  external files   ${candidates.length > 0 ? "up to 24" : "0"}`,
+    `  harness changes  ${harnessPlan.mutations.length}`,
+    `  approval         ${approvalReusable ? "reused" : "required once"}`,
+  ]);
+  if (dryRun) return 0;
+  if (!approvalReusable && candidates.length > 0) {
+    if (!context.isTTY)
+      throw new CliError(
+        "setup.confirmation-required",
+        "Run loom setup in an interactive terminal to review and confirm the exact plan",
+        EXIT_APPROVAL,
+      );
+    if (!(await context.confirm("Install and activate this exact setup plan?")))
+      throw new CliError(
+        "setup.cancelled",
+        "Setup was not approved",
+        EXIT_APPROVAL,
+      );
+  }
+  if (
+    (dart !== undefined && sha256(await readFile(dart)) !== dartDigest) ||
+    (git !== undefined && sha256(await readFile(git)) !== gitDigest)
+  )
+    throw new CliError(
+      "setup.executable-drift",
+      "Git or Dart changed after setup review; generate a new setup command",
+    );
+  const installerPlan =
+    installer === undefined ? undefined : await installer.plan(context.root);
+  if (installerPlan && hasErrors(installerPlan.diagnostics))
+    throw new CliError(
+      "setup.install-plan-invalid",
+      installerPlan.diagnostics.map((item) => item.message).join("; "),
+    );
+  if (
+    approvalReusable &&
+    (installerPlan?.mutations.length ?? 0) === 0 &&
+    harnessPlan.mutations.length === 0
+  ) {
+    printLines(context.stdout, ["Setup complete", "  no changes"]);
+    return 0;
+  }
+  const transaction = createSetupTransaction(setupPlan, now);
+  await writeJsonAtomic(
+    join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
+    setupPlan,
+  );
+  await writeJsonAtomic(
+    join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+    transaction,
+  );
+  let installerChanged = false;
+  let harnessChanged = false;
+  try {
+    if (installer && installerPlan) {
+      const result = await installer.apply(installerPlan);
+      if (hasErrors(result.diagnostics))
+        throw new Error(
+          result.diagnostics.map((item) => item.message).join("; "),
+        );
+      installerChanged = result.changed.length > 0;
+    }
+    const harnessResult = await adapter.apply(harnessPlan);
+    if (hasErrors(harnessResult.diagnostics))
+      throw new Error(
+        harnessResult.diagnostics.map((item) => item.message).join("; "),
+      );
+    harnessChanged = harnessResult.changed.length > 0;
+    const verification = [
+      ...(installer ? await installer.verify(context.root) : []),
+      ...(await adapter.verify(context.root)),
+    ];
+    if (hasErrors(verification))
+      throw new Error(verification.map((item) => item.message).join("; "));
+    await writeState(context, adapter.id, resolution, selected);
+    await writeJsonAtomic(
+      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
+      setupPlanSchema.parse(setupPlan),
+    );
+    if (candidates.length > 0)
+      await writeSetupApproval(
+        context.root,
+        context.env,
+        setupApprovalSchema.parse({
+          schemaVersion: 1,
+          planId: setupPlan.planId,
+          approvedRecipeDigests: recipeDigests,
+          approvedAt: now.toISOString(),
+          expiresAt: new Date(
+            now.getTime() + 365 * 24 * 60 * 60_000,
+          ).toISOString(),
+        }),
+      );
+    const finishedAt = context.now().toISOString();
+    await writeJsonAtomic(
+      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+      setupTransactionSchema.parse({
+        ...transaction,
+        status: "succeeded",
+        updatedAt: finishedAt,
+        receipt: {
+          schemaVersion: 1,
+          transactionId: transaction.transactionId,
+          planId: setupPlan.planId,
+          status: "succeeded",
+          startedAt: transaction.createdAt,
+          finishedAt,
+          items: candidates.map((item) => ({
+            candidateId: item.id,
+            recipeDigest: item.recipeDigest,
+            status: "installed",
+          })),
+        },
+      }),
+    );
+  } catch (cause) {
+    if (harnessChanged && !harnessState.installed)
+      await adapter.uninstallOwned(context.root).catch(() => undefined);
+    if (installerChanged && installer)
+      await installer.uninstall(context.root).catch(() => undefined);
+    const finishedAt = context.now().toISOString();
+    await writeJsonAtomic(
+      join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+      setupTransactionSchema.parse({
+        ...transaction,
+        status: "failed",
+        updatedAt: finishedAt,
+        receipt: {
+          schemaVersion: 1,
+          transactionId: transaction.transactionId,
+          planId: setupPlan.planId,
+          status: "failed",
+          startedAt: transaction.createdAt,
+          finishedAt,
+          items: candidates.map((item) => ({
+            candidateId: item.id,
+            recipeDigest: item.recipeDigest,
+            status: "failed",
+            error: message(cause),
+          })),
+        },
+      }),
+    ).catch(() => undefined);
+    throw cause;
+  }
+  printLines(context.stdout, [
+    "Setup complete",
+    `  plan             ${setupPlan.planId}`,
+    `  transaction      ${transaction.transactionId}`,
+    "  doctor           ok",
+  ]);
+  return 0;
+}
+
+async function readSetupTransaction(root: string) {
+  await assertSafeSetupState(root);
+  try {
+    return setupTransactionSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+          "utf8",
+        ),
+      ) as unknown,
+    );
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw cause;
+  }
+}
+
+async function transactionsCommand(
+  parsed: ParsedArguments,
+  context: CommandContext,
+): Promise<number> {
+  assertFlags(parsed, []);
+  if (parsed.positionals.length !== 0) throw usageError();
+  const transaction = await readSetupTransaction(context.root);
+  printLines(context.stdout, [
+    "Transactions",
+    ...(transaction
+      ? [
+          `  ${transaction.transactionId} ${transaction.status} ${transaction.planId}`,
+        ]
+      : ["  none"]),
+  ]);
+  return 0;
+}
+
+async function rollbackSetup(
+  context: CommandContext,
+  transaction: NonNullable<Awaited<ReturnType<typeof readSetupTransaction>>>,
+): Promise<void> {
+  const plan = setupPlanSchema.parse(
+    JSON.parse(
+      await readFile(
+        join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupPlan),
+        "utf8",
+      ),
+    ) as unknown,
+  );
+  if (
+    plan.planId !== transaction.planId ||
+    plan.root !== (await realpath(context.root)) ||
+    canonicalJson(plan.candidates.map((item) => item.recipeDigest).sort()) !==
+      canonicalJson([...transaction.recipeDigests].sort())
+  )
+    throw new CliError(
+      "setup.rollback-binding-mismatch",
+      "Transaction and setup plan bindings do not match",
+    );
+  const installer = context.installerFactory(
+    (await context.resolveExecutable("dart", context.env)) ?? process.execPath,
+    (await context.resolveExecutable("git", context.env)) ?? process.execPath,
+  );
+  const result = await installer.uninstall(context.root);
+  if (hasErrors(result.diagnostics))
+    throw new CliError(
+      "setup.rollback-failed",
+      result.diagnostics.map((item) => item.message).join("; "),
+    );
+  await Promise.all(
+    [PROJECT_STATE_FILES.setupApproval, PROJECT_STATE_FILES.setupPlan].map(
+      (name) => rm(join(context.root, STATE_DIRECTORY, name), { force: true }),
+    ),
+  );
+  await removeSetupApproval(context.root, context.env);
+  const finishedAt = context.now().toISOString();
+  await writeJsonAtomic(
+    join(context.root, STATE_DIRECTORY, PROJECT_STATE_FILES.setupTransaction),
+    setupTransactionSchema.parse({
+      ...transaction,
+      status: "rolled-back",
+      updatedAt: finishedAt,
+      receipt: {
+        schemaVersion: 1,
+        transactionId: transaction.transactionId,
+        planId: transaction.planId,
+        status: "rolled-back",
+        startedAt: transaction.createdAt,
+        finishedAt,
+        items: plan.candidates.map((item) => ({
+          candidateId: item.id,
+          recipeDigest: item.recipeDigest,
+          status: "rolled-back",
+        })),
+      },
+    }),
+  );
+}
+
+async function rollbackCommand(
+  parsed: ParsedArguments,
+  context: CommandContext,
+): Promise<number> {
+  assertFlags(parsed, []);
+  const [id] = parsed.positionals;
+  if (parsed.positionals.length !== 1 || id === undefined) throw usageError();
+  const transaction = await readSetupTransaction(context.root);
+  if (transaction === undefined || transaction.transactionId !== id)
+    throw new CliError(
+      "setup.transaction-not-found",
+      `Unknown transaction: ${id}`,
+    );
+  await rollbackSetup(context, transaction);
+  printLines(context.stdout, [`Rolled back ${id}`]);
+  return 0;
+}
+
+async function recoverCommand(
+  parsed: ParsedArguments,
+  context: CommandContext,
+): Promise<number> {
+  assertFlags(parsed, []);
+  if (parsed.positionals.length !== 0) throw usageError();
+  const transaction = await readSetupTransaction(context.root);
+  if (
+    transaction === undefined ||
+    !["pending", "running", "failed"].includes(transaction.status)
+  ) {
+    printLines(context.stdout, ["Recovery", "  nothing to recover"]);
+    return 0;
+  }
+  await rollbackSetup(context, transaction);
+  printLines(context.stdout, [
+    "Recovery",
+    `  rolled back ${transaction.transactionId}`,
+  ]);
+  return 0;
+}
+
 async function applyCommand(
   parsed: ParsedArguments,
   context: CommandContext,
@@ -627,8 +1271,39 @@ async function removeCommand(
   if (parsed.positionals.length !== 0) throw usageError();
   const adapter = adapterFor(value(parsed, "harness"));
   const dryRun = flag(parsed, "dry-run");
+  const setupOwnership = join(
+    context.root,
+    STATE_DIRECTORY,
+    "setup-ownership.json",
+  );
+  const hasSetupOwnership = await access(setupOwnership)
+    .then(() => true)
+    .catch(() => false);
+  const installerResult =
+    hasSetupOwnership && adapter.id === "opencode"
+      ? await context
+          .installerFactory(
+            (await context.resolveExecutable("dart", context.env)) ??
+              process.execPath,
+            (await context.resolveExecutable("git", context.env)) ??
+              process.execPath,
+          )
+          .uninstall(context.root, dryRun)
+      : { changed: [], skipped: [], diagnostics: [] };
+  if (hasErrors(installerResult.diagnostics)) {
+    printLines(context.stdout, [
+      `Remove (${adapter.id})`,
+      `  changed ${installerResult.changed.length}`,
+      `  skipped ${installerResult.skipped.length}`,
+      ...installerResult.diagnostics.map(
+        (item) => `  ${item.level} ${item.code}: ${item.message}`,
+      ),
+    ]);
+    return EXIT_ERROR;
+  }
   const result = await adapter.uninstallOwned(context.root, dryRun);
   if (!dryRun && !hasErrors(result.diagnostics)) {
+    await removeSetupApproval(context.root, context.env);
     if (await hasOwnedHarnesses(context.root)) {
       await removeWorkflowHarness(context.root, adapter.id);
       await removeLockHarness(context.root, adapter.id, context.now());
@@ -638,6 +1313,9 @@ async function removeCommand(
           PROJECT_STATE_FILES.project,
           PROJECT_STATE_FILES.workflow,
           PROJECT_STATE_FILES.lock,
+          PROJECT_STATE_FILES.setupApproval,
+          PROJECT_STATE_FILES.setupPlan,
+          PROJECT_STATE_FILES.setupTransaction,
         ].map((name) =>
           rm(join(context.root, STATE_DIRECTORY, name), { force: true }),
         ),
@@ -646,8 +1324,11 @@ async function removeCommand(
   }
   printLines(context.stdout, [
     dryRun ? `Remove preview (${adapter.id})` : `Remove (${adapter.id})`,
-    `  changed ${result.changed.length}`,
-    `  skipped ${result.skipped.length}`,
+    `  changed ${result.changed.length + installerResult.changed.length}`,
+    `  skipped ${result.skipped.length + installerResult.skipped.length}`,
+    ...installerResult.diagnostics.map(
+      (item) => `  ${item.level} ${item.code}: ${item.message}`,
+    ),
     ...result.diagnostics.map(
       (item) => `  ${item.level} ${item.code}: ${item.message}`,
     ),
@@ -766,6 +1447,26 @@ async function doctorCommand(
     ...state.diagnostics,
     ...(await adapter.verify(context.root)),
   ];
+  const setupOwnership = join(
+    context.root,
+    STATE_DIRECTORY,
+    "setup-ownership.json",
+  );
+  if (
+    await access(setupOwnership)
+      .then(() => true)
+      .catch(() => false)
+  )
+    diagnostics.push(
+      ...(await context
+        .installerFactory(
+          (await context.resolveExecutable("dart", context.env)) ??
+            process.execPath,
+          (await context.resolveExecutable("git", context.env)) ??
+            process.execPath,
+        )
+        .verify(context.root)),
+    );
   const stateNames = [
     PROJECT_STATE_FILES.project,
     PROJECT_STATE_FILES.workflow,
@@ -798,11 +1499,7 @@ async function doctorCommand(
             : capabilityLockSchema;
       schema.parse(value);
     } catch (error) {
-      if (
-        !state.installed &&
-        !anyStateFile &&
-        (error as NodeJS.ErrnoException).code === "ENOENT"
-      )
+      if (!anyStateFile && (error as NodeJS.ErrnoException).code === "ENOENT")
         continue;
       diagnostics.push({
         level: "error",
@@ -986,6 +1683,19 @@ function usageError(): CliError {
   return new CliError("usage.invalid-arguments", usage, EXIT_USAGE);
 }
 
+async function confirmInTerminal(prompt: string): Promise<boolean> {
+  const terminal = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  try {
+    const answer = await terminal.question(`${prompt} [y/N] `);
+    return /^(?:y|yes)$/iu.test(answer.trim());
+  } finally {
+    terminal.close();
+  }
+}
+
 export async function runCli(
   args: readonly string[] = process.argv.slice(2),
   options: RunCliOptions = {},
@@ -996,6 +1706,12 @@ export async function runCli(
     stdout: options.stdout ?? process.stdout,
     stderr: options.stderr ?? process.stderr,
     now: options.now ?? (() => new Date()),
+    isTTY: options.isTTY ?? process.stdin.isTTY === true,
+    confirm: options.confirm ?? confirmInTerminal,
+    installerFactory:
+      options.installerFactory ??
+      ((dartPath, gitPath) => new CapabilityInstaller({ dartPath, gitPath })),
+    resolveExecutable: options.resolveExecutable ?? executablePath,
   };
   let command = args[0] ?? "";
   try {
@@ -1015,6 +1731,16 @@ export async function runCli(
         return await discoverCommand(parsed, context);
       case "capabilities":
         return await capabilitiesCommand(parsed, context);
+      case "connect":
+        return await connectCommand(parsed, context);
+      case "setup":
+        return await setupCommand(parsed, context);
+      case "transactions":
+        return await transactionsCommand(parsed, context);
+      case "rollback":
+        return await rollbackCommand(parsed, context);
+      case "recover":
+        return await recoverCommand(parsed, context);
       case "apply":
         return await applyCommand(parsed, context);
       case "remove":

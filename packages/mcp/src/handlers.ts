@@ -4,12 +4,16 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   capabilityLockSchema,
+  canonicalJson,
   detectProject,
+  encodeSetupIntent,
   loadEffectivePolicy,
   policySchema,
   projectStateSchema,
   projectProfileSchema,
   redactLockSecrets,
+  redactSecrets,
+  sha256,
   type CapabilityCandidate,
   type CapabilityPlan,
   type Policy,
@@ -40,6 +44,7 @@ const rootSchema = z
   .refine((value) => !value.includes("\0"), "Path contains a null byte")
   .optional();
 const networkDiscoverySchema = z.boolean().default(false);
+const setupNetworkDiscoverySchema = z.boolean().default(true);
 
 export const projectDetectInputSchema = z.object({ root: rootSchema }).strict();
 export const projectPlanInputSchema = z
@@ -63,6 +68,14 @@ export const capabilityResolveInputSchema = z
   })
   .strict();
 export const statusInputSchema = z.object({ root: rootSchema }).strict();
+export const setupRecommendInputSchema = z
+  .object({
+    root: rootSchema,
+    task: z.string().trim().min(1).max(10_000).optional(),
+    harness: z.literal("opencode").default("opencode"),
+    networkDiscovery: setupNetworkDiscoverySchema,
+  })
+  .strict();
 
 export interface LoomMcpDependencies {
   cwd?: () => string;
@@ -97,6 +110,7 @@ export interface LoomToolHandlers {
   capabilityStatus(input: unknown): Promise<ToolData>;
   workflowStatus(input: unknown): Promise<ToolData>;
   doctor(input: unknown): Promise<ToolData>;
+  setupRecommend(input: unknown): Promise<ToolData>;
 }
 
 interface StateResult {
@@ -231,6 +245,45 @@ export function createLoomToolHandlers(
         uncovered: resolution.plan.uncovered,
         requiredApprovals: resolution.plan.requiredApprovals,
         discovery,
+      };
+    },
+
+    async setupRecommend(rawInput) {
+      const input = setupRecommendInputSchema.parse(rawInput);
+      const { resolution, discovery } = await runPlan(input);
+      const requestedCapabilities = [
+        ...new Set(resolution.plan.selected.flatMap((item) => item.coverage)),
+      ].sort((a, b) => a.localeCompare(b));
+      const {
+        detectionSignals: _detectionSignals,
+        existingAgentConfigs: _existingAgentConfigs,
+        ...projectBinding
+      } = resolution.project;
+      const intent = encodeSetupIntent({
+        schemaVersion: 1,
+        root: resolution.project.root,
+        projectFingerprint: sha256(canonicalJson(projectBinding)),
+        mode: "apply",
+        harness: input.harness,
+        ...(input.task === undefined
+          ? {}
+          : { task: String(redactSecrets(input.task)) }),
+        requestedCapabilities,
+      });
+      return {
+        intent,
+        command: `loom setup --intent ${intent}`,
+        selected: resolution.plan.selected.map((item) => ({
+          id: item.candidate.id,
+          name: item.candidate.name,
+          score: item.score,
+          coverage: item.coverage,
+          reasons: item.reasons,
+          penalties: item.penalties,
+        })),
+        approvals: resolution.plan.requiredApprovals,
+        uncovered: resolution.plan.uncovered,
+        warnings: discovery["warnings"],
       };
     },
 

@@ -11,7 +11,8 @@ harness adapters; dependencies flow toward `@loom/core`.
 | [`packages/core`](../packages/core/src/index.ts)                       | Domain schemas, detection, task classification, scoring, policy, resolver, locks, paths, and harness contracts. |
 | [`packages/profiles`](../packages/profiles/src/index.ts)               | Maps detected stacks to required and useful capabilities.                                                       |
 | [`packages/registry`](../packages/registry/src/index.ts)               | Built-in catalog, registry contracts, remote discovery adapters, cache, and project planner.                    |
-| [`packages/mcp`](../packages/mcp/src/server.ts)                        | Read-only stdio MCP server exposing eight tools.                                                                |
+| [`packages/mcp`](../packages/mcp/src/server.ts)                        | Read-only stdio MCP server exposing nine tools.                                                                 |
+| [`packages/installers`](../packages/installers/src/index.ts)           | Typed external capability staging, activation, ownership, and rollback.                                         |
 | [`packages/cli`](../packages/cli/src/index.ts)                         | User commands, output, state persistence, and adapter selection.                                                |
 | [`packages/skills`](../packages/skills)                                | Canonical harness-neutral, instruction-only Loom skills.                                                        |
 | [`integrations/opencode`](../integrations/opencode/src/index.ts)       | OpenCode config/plugin/skill projection and ownership.                                                          |
@@ -32,8 +33,13 @@ harness adapters; dependencies flow toward `@loom/core`.
 4. [`planProject`](../packages/registry/src/planner.ts) queries registries,
    deduplicates candidates by ID, scores them, applies policy, and resolves a
    minimal set covering required capabilities.
-5. The selected harness adapter plans guarded file mutations. `apply` persists
-   project/workflow/lock state only after a successful non-dry-run mutation.
+5. `connect` projects only Loom MCP and bundled skills through the selected
+   harness adapter.
+6. The host LLM calls read-only `loom_setup_recommend`, which returns an
+   untrusted, project-bound intent token rather than executable instructions.
+7. `setup` re-resolves the plan, validates an immutable typed recipe, obtains
+   one authenticated approval, installs and activates, then verifies before
+   committing state.
 
 CLI planning uses only the built-in catalog. Network-backed sources are used by
 explicit discovery/cache commands; MCP tools use them only when
@@ -48,6 +54,12 @@ Project state uses `.loom/` with schema version 1:
 - `capabilities.lock.json`: per-harness and combined entries with exact versions
 - `ownership.json`: adapter-owned files, hashes, and config regions
 - `policy.toml`: project policy layered over user preferences and defaults
+- `setup-plan.json`: exact setup bindings and recipe digests
+- `setup-transaction.json`: durable setup status and receipt
+- `setup-ownership.json`: external setup-owned files and config pointers
+
+Authenticated setup approvals live under the user XDG state directory rather
+than in the agent-writable project.
 
 [`resolveLoomPaths`](../packages/core/src/paths.ts) defines user config, cache,
 and state roots under XDG directories, with home-directory fallbacks. Registry

@@ -1,9 +1,9 @@
 # Loom
 
-Loom detects a project, resolves a minimal capability plan, and safely projects
-its own MCP server and shared skills into a supported agent harness. It supports
-greenfield directories and brownfield repositories without replacing existing
-harness configuration.
+Loom connects a read-only project intelligence MCP to an agent harness, lets the
+host LLM recommend a deterministic setup, and executes one reviewed,
+version-bound setup command. It supports greenfield directories and brownfield
+repositories without replacing existing harness configuration.
 
 Implemented harness adapters are **OpenCode**, **Codex**, **Claude Code**, **Oh
 My Pi (OMP)**, and **Antigravity**.
@@ -22,16 +22,22 @@ Use the built CLI from a project directory:
 
 ```sh
 /path/to/loom/packages/cli/dist/index.js detect
-/path/to/loom/packages/cli/dist/index.js plan --task "refactor the API"
-/path/to/loom/packages/cli/dist/index.js apply --dry-run --harness opencode
-/path/to/loom/packages/cli/dist/index.js apply --harness opencode
+/path/to/loom/packages/cli/dist/index.js connect --harness opencode
 /path/to/loom/packages/cli/dist/index.js doctor --harness opencode
 ```
 
-`opencode` is the default harness when `--harness` is omitted. A normal apply
-installs Loom's integration and bundled skills only. Registry candidates are
-recommendations; Loom does not automatically install external MCP servers,
-skills, CLIs, plugins, or framework tools.
+Restart OpenCode, then ask `Set up this project with Loom` or run `/loom:setup`.
+The host LLM calls the read-only `loom_setup_recommend` tool and returns one
+`loom setup --intent loom1_...` command. Running it revalidates the project and
+exact recipe, shows one consolidated review, asks once, installs, activates,
+verifies, and records rollback state. An unchanged repeat is a verified no-op
+and reuses the authenticated approval.
+
+The first audited external recipe supports Flutter projects on OpenCode. It
+vendors only the 22 instruction-only skills from
+`flutter/agent-plugins@1e5696a2e986345f7ecc92842b5e9293bc079d6f` and activates
+the absolute Dart SDK's `mcp-server`; hooks and repository scripts are excluded.
+Other candidates remain recommendations until they have an audited typed recipe.
 
 Apply refuses plans with uncovered requirements or selected candidates that do
 not have an exact version/revision. This prevents an unresolved catalog
@@ -50,7 +56,7 @@ sudo install loom-v*-linux-x64 /usr/local/bin/loom
 loom --help
 ```
 
-Release binaries embed Bun, Loom's runtime code, and all seven canonical skills;
+Release binaries embed Bun, Loom's runtime code, and all eight canonical skills;
 Node.js is not required. Native builds are published for Linux x64/ARM64, macOS
 x64/ARM64, and Windows x64.
 
@@ -63,7 +69,12 @@ x64/ARM64, and Windows x64.
 | `explain`                                                            | Print selection and rejection reasons for the default project plan.                 |
 | `discover mcp\|skills <query>`                                       | Query MCP or skill discovery sources without installing results.                    |
 | `capabilities [--json]`                                              | List the capability vocabulary.                                                     |
+| `connect [--dry-run] [--harness ...]`                                | Connect Loom MCP and bundled setup skills without external installation.            |
+| `setup --intent <loom1_token> [--dry-run]`                           | Revalidate and execute one LLM-recommended exact setup transaction.                 |
 | `apply [--dry-run] [--harness ...] [--task <text>] [--approve <id>]` | Apply an ownership-checked harness plan. Repeat `--approve` for required approvals. |
+| `transactions`                                                       | Show the current setup transaction.                                                 |
+| `rollback <transaction-id>`                                          | Remove only setup-owned external capabilities from that transaction.                |
+| `recover`                                                            | Recover an interrupted setup transaction.                                           |
 | `remove [--dry-run] [--harness ...]`                                 | Remove only unchanged Loom-owned resources.                                         |
 | `doctor [--json] [--harness ...]`                                    | Verify harness ownership and project state.                                         |
 | `registry sync\|status`                                              | Refresh or inspect the Official MCP Registry cache.                                 |
@@ -89,18 +100,20 @@ An apply may create or update:
 - OMP: `mcpServers.loom` in `.omp/mcp.json` and `.omp/skills/loom-*`
 - Antigravity: `mcpServers.loom` in `.agents/mcp_config.json`
 
-The canonical seven instruction-only skills live in
+The canonical eight instruction-only skills live in
 [`packages/skills`](packages/skills). OpenCode, Codex, and Antigravity target
 the shared `.agents/skills` project path; Claude Code and OMP use their native
 skill directories.
 
 ## Verification status
 
-OpenCode is the verified dogfood path: Loom was applied twice, loaded by a fresh
-OpenCode process, invoked through `loom_project_detect`, checked with `doctor`,
-and removed through the ownership-aware uninstall path. The Codex adapter was
-also applied twice, checked, and removed while OpenCode remained healthy, but
-Codex ignores project `.codex` configuration until the project is trusted.
+OpenCode is the verified setup path: a fresh host LLM invoked
+`loom_setup_recommend`, returned one setup command, installed all 22 pinned
+Flutter/Dart skills, connected Dart and Loom MCP servers, reused approval on an
+unchanged rerun, passed doctor, and rolled back external setup while retaining
+Loom. The Codex adapter was also applied twice, checked, and removed while
+OpenCode remained healthy, but Codex ignores project `.codex` configuration
+until the project is trusted.
 
 The Official MCP Registry and pinned `skills@1.5.23` integrations have mocked
 contract tests and live discovery smoke tests. Registry cache sync was also
