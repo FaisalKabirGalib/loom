@@ -22,6 +22,7 @@ interface Seed {
   runtime?: RuntimeKind;
   repository?: string;
   package?: string;
+  version?: string;
   permissions?: Partial<Permissions>;
   notes?: string[];
 }
@@ -47,6 +48,7 @@ const seed = (value: Seed): CapabilityCandidate =>
         : { repository: value.repository }),
       ...(value.package === undefined ? {} : { package: value.package }),
     },
+    ...(value.version === undefined ? {} : { version: value.version }),
     ecosystems: value.ecosystems,
     provides: value.provides,
     tags: [...new Set([...value.ecosystems, ...value.triggers])],
@@ -496,6 +498,7 @@ const seeds: Seed[] = [
     scope: "project",
     runtime: "dart",
     repository: github("flutter/agent-plugins"),
+    version: "1e5696a2e986345f7ecc92842b5e9293bc079d6f",
     permissions: device,
   },
   {

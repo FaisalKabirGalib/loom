@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, rm } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -19,6 +19,7 @@ import {
   capabilityLockSchema,
   ownershipStateSchema,
   projectStateSchema,
+  redactLockSecrets,
   redactSecrets,
   writeJsonAtomic,
   type CapabilityCandidate,
@@ -612,7 +613,10 @@ async function writeState(
     join(directory, PROJECT_STATE_FILES.workflow),
     workflow,
   );
-  await writeJsonAtomic(join(directory, PROJECT_STATE_FILES.lock), safe(lock));
+  await writeJsonAtomic(
+    join(directory, PROJECT_STATE_FILES.lock),
+    redactLockSecrets(lock),
+  );
 }
 
 async function removeCommand(
@@ -762,12 +766,28 @@ async function doctorCommand(
     ...state.diagnostics,
     ...(await adapter.verify(context.root)),
   ];
-  for (const name of [
+  const stateNames = [
     PROJECT_STATE_FILES.project,
     PROJECT_STATE_FILES.workflow,
     PROJECT_STATE_FILES.lock,
-  ]) {
-    const path = join(context.root, STATE_DIRECTORY, name);
+  ];
+  const statePaths = stateNames.map((name) =>
+    join(context.root, STATE_DIRECTORY, name),
+  );
+  const anyStateFile = (
+    await Promise.all(
+      statePaths.map(async (path) => {
+        try {
+          await access(path);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    )
+  ).some(Boolean);
+  for (const [index, name] of stateNames.entries()) {
+    const path = statePaths[index]!;
     try {
       const value: unknown = JSON.parse(await readFile(path, "utf8"));
       const schema =
@@ -777,7 +797,13 @@ async function doctorCommand(
             ? workflowStateSchema
             : capabilityLockSchema;
       schema.parse(value);
-    } catch {
+    } catch (error) {
+      if (
+        !state.installed &&
+        !anyStateFile &&
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      )
+        continue;
       diagnostics.push({
         level: "error",
         code: "loom.state-invalid",

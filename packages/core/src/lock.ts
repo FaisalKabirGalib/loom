@@ -109,7 +109,7 @@ export function parseCapabilityLock(source: string): CapabilityLock {
 }
 
 export function redactLockSecrets<T>(value: T): T {
-  return sanitize(value, "") as T;
+  return sanitize(value, []) as T;
 }
 
 function toLockEntry(
@@ -157,18 +157,30 @@ function toLockEntry(
   });
 }
 
-function sanitize(value: unknown, key: string): unknown {
-  if (Array.isArray(value)) return value.map((item) => sanitize(item, key));
+function sanitize(
+  value: unknown,
+  path: readonly string[],
+  permissionName = false,
+): unknown {
+  if (Array.isArray(value)) {
+    const preservePermissionNames =
+      path.at(-2) === "permissions" && path.at(-1) === "secrets";
+    return value.map((item) => sanitize(item, path, preservePermissionNames));
+  }
   if (value && typeof value === "object")
     return Object.fromEntries(
-      Object.entries(value).map(([name, item]) => [name, sanitize(item, name)]),
+      Object.entries(value).map(([name, item]) => [
+        name,
+        sanitize(item, [...path, name]),
+      ]),
     );
   if (typeof value !== "string") return value;
+  const key = path.at(-1) ?? "";
   if (
     /password|secret|token|credential|authorization|api[-_]?key|dsn/i.test(
       key,
     ) &&
-    key !== "secrets"
+    !permissionName
   )
     return "[REDACTED]";
   return value

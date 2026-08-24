@@ -22,7 +22,7 @@ describe("Loom MCP server", () => {
 
       expect(client.getServerVersion()).toMatchObject({
         name: "loom",
-        version: "0.1.0",
+        version: "0.1.1",
       });
       const listed = await client.listTools();
       expect(listed.tools.map((tool) => tool.name)).toEqual(LOOM_TOOL_NAMES);
@@ -51,7 +51,12 @@ describe("Loom MCP server", () => {
     const root = await mkdtemp(join(tmpdir(), "loom-mcp-secret-"));
     await writeFile(
       join(root, "package.json"),
-      JSON.stringify({ dependencies: { api_token: "do-not-expose" } }),
+      JSON.stringify({
+        dependencies: {
+          api_token: "do-not-expose",
+          secrets: "also-do-not-expose",
+        },
+      }),
     );
     const server = createLoomMcpServer({ cwd: () => root });
     const client = new Client({ name: "loom-test", version: "1.0.0" });
@@ -66,7 +71,32 @@ describe("Loom MCP server", () => {
         arguments: {},
       });
       expect(JSON.stringify(called)).not.toContain("do-not-expose");
+      expect(JSON.stringify(called)).not.toContain("also-do-not-expose");
       expect(JSON.stringify(called)).toContain("[REDACTED]");
+    } finally {
+      await Promise.allSettled([client.close(), server.close()]);
+    }
+  });
+
+  it("preserves permission secret names as arrays", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-mcp-permissions-"));
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    const server = createLoomMcpServer({ cwd: () => root });
+    const client = new Client({ name: "loom-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const called = await client.callTool({
+        name: "loom_project_plan",
+        arguments: {},
+      });
+      expect(JSON.stringify(called)).toContain('"secrets":[]');
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { detectProject } from "@loom/core";
 
 import { runCli } from "./index.js";
 
@@ -85,13 +86,13 @@ describe("runCli", () => {
     expect(planned.code).toBe(0);
     expect(detection).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.0",
+      version: "0.1.1",
       command: "detect",
       ok: true,
     });
     expect(plan).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.0",
+      version: "0.1.1",
       command: "plan",
       ok: true,
     });
@@ -111,6 +112,33 @@ describe("runCli", () => {
     expect(result.stdout).toContain("Apply preview (opencode)");
     expect(await exists(join(root, "opencode.json"))).toBe(false);
     expect(await exists(join(root, ".loom"))).toBe(false);
+  });
+
+  it("treats missing state as normal before installation", async () => {
+    const root = await fixture();
+    const result = await invoke(root, ["doctor", "--harness", "opencode"]);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("installed no");
+    expect(result.stdout).not.toContain("loom.state-invalid");
+  });
+
+  it("reports partial state before installation", async () => {
+    const root = await fixture();
+    await mkdir(join(root, ".loom"));
+    await writeFile(
+      join(root, ".loom/project.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        version: "0.1.1",
+        project: detectProject(root),
+      })}\n`,
+    );
+
+    const result = await invoke(root, ["doctor", "--harness", "opencode"]);
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("loom.state-invalid");
   });
 
   it("omits mutation contents from JSON plans", async () => {
@@ -177,7 +205,7 @@ describe("runCli", () => {
       JSON.parse(await readFile(join(root, ".loom/project.json"), "utf8")),
     ).toMatchObject({
       schemaVersion: 1,
-      version: "0.1.0",
+      version: "0.1.1",
     });
     expect(await exists(join(root, ".loom/workflow.json"))).toBe(true);
     expect(await exists(join(root, ".loom/capabilities.lock.json"))).toBe(true);
@@ -263,12 +291,50 @@ describe("runCli", () => {
     expect(await exists(join(root, ".loom/project.json"))).toBe(false);
   });
 
-  it("refuses to lock unresolved built-in recommendations", async () => {
+  it("applies Flutter with approval and an exact upstream revision", async () => {
     const root = await mkdtemp(join(tmpdir(), "loom-cli-flutter-"));
     roots.push(root);
     await writeFile(
       join(root, "pubspec.yaml"),
       "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+
+    const withoutApproval = await invoke(root, [
+      "apply",
+      "--harness",
+      "opencode",
+    ]);
+    const result = await invoke(root, [
+      "apply",
+      "--harness",
+      "opencode",
+      "--approve",
+      "builtin:flutter-agent-plugins",
+    ]);
+    const lock = JSON.parse(
+      await readFile(join(root, ".loom/capabilities.lock.json"), "utf8"),
+    ) as { entries: Array<{ id: string; version: string }> };
+    const doctor = await invoke(root, ["doctor", "--harness", "opencode"]);
+
+    expect(withoutApproval.code).toBe(3);
+    expect(withoutApproval.stderr).toContain("approval.required");
+    expect(result.code).toBe(0);
+    expect(await exists(join(root, "opencode.json"))).toBe(true);
+    expect(lock.entries).toContainEqual(
+      expect.objectContaining({
+        id: "builtin:flutter-agent-plugins",
+        version: "1e5696a2e986345f7ecc92842b5e9293bc079d6f",
+      }),
+    );
+    expect(doctor.code).toBe(0);
+    expect(doctor.stdout).toContain("  ok");
+  });
+
+  it("refuses to lock unresolved built-in recommendations", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ dependencies: { "react-native": "0.76.0" } }),
     );
 
     const result = await invoke(root, ["apply", "--harness", "opencode"]);

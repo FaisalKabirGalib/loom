@@ -55,5 +55,6 @@ overlap. Duplicate coverage is rejected with an explanation; unrelated eligible
 entries remain optional.
 
 The lock contains only selected candidates with an exact version or revision.
-Current CLI state marks these entries `recommended`; it does not install the
-external candidates. See [ADR 0001](adr/0001-minimum-capability-resolver.md).
+After policy and any explicit approval checks pass, CLI state marks selected
+entries `approved`; it does not install external candidates. See
+[ADR 0001](adr/0001-minimum-capability-resolver.md).

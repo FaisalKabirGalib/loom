@@ -86,5 +86,10 @@ describe("BUILTIN_CATALOG", () => {
       expect(candidate.transport, candidate.id).toBe("http");
       expect(candidate.permissions.network, candidate.id).toBe(true);
     }
+    expect(
+      BUILTIN_CATALOG.find(
+        (candidate) => candidate.id === "builtin:flutter-agent-plugins",
+      )?.version,
+    ).toBe("1e5696a2e986345f7ecc92842b5e9293bc079d6f");
   });
 });

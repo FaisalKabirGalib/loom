@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { redactLockSecrets, redactSecrets } from "@loom/core";
+import { VERSION, redactLockSecrets } from "@loom/core";
 import { z } from "zod";
 
 import {
@@ -42,7 +42,7 @@ export function createLoomMcpServer(
   dependencies: LoomMcpDependencies = {},
 ): McpServer {
   const server = new McpServer(
-    { name: "loom", version: "0.1.0" },
+    { name: "loom", version: VERSION },
     { capabilities: { tools: {} } },
   );
   const handlers = createLoomToolHandlers(dependencies);
@@ -159,7 +159,8 @@ async function result(run: () => Promise<Record<string, unknown>>) {
 }
 
 function toJson(value: unknown): Record<string, unknown> {
-  return JSON.parse(
-    JSON.stringify(redactLockSecrets(redactSecrets(value))),
-  ) as Record<string, unknown>;
+  return JSON.parse(JSON.stringify(redactLockSecrets(value))) as Record<
+    string,
+    unknown
+  >;
 }

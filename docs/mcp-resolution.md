@@ -5,9 +5,9 @@ for a project.
 
 ## Loom MCP server
 
-`loom mcp` runs a stdio server named `loom` at version `0.1.0`. It exposes
-exactly eight tools, all annotated read-only, non-destructive, idempotent, and
-closed-world:
+`loom mcp` runs a stdio server named `loom` at the current Loom version. It
+exposes exactly eight tools, all annotated read-only, non-destructive,
+idempotent, and closed-world:
 
 | Tool                      | Result                                                                 |
 | ------------------------- | ---------------------------------------------------------------------- |
