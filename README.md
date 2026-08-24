@@ -121,6 +121,7 @@ verified across two resumable 1,000-candidate checkpoints.
 
 ## Documentation
 
+- [Codebase guide](docs/CODEBASE_GUIDE.md)
 - [Architecture](docs/architecture.md)
 - [Capability model](docs/capability-model.md)
 - [MCP resolution](docs/mcp-resolution.md)
