@@ -23,7 +23,7 @@ describe("Loom MCP server", () => {
 
       expect(client.getServerVersion()).toMatchObject({
         name: "loom",
-        version: "0.2.0",
+        version: "0.2.2",
       });
       const listed = await client.listTools();
       expect(listed.tools.map((tool) => tool.name)).toEqual(LOOM_TOOL_NAMES);

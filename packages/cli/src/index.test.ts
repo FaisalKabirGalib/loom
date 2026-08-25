@@ -235,13 +235,13 @@ describe("runCli", () => {
     expect(planned.code).toBe(0);
     expect(detection).toMatchObject({
       schemaVersion: 1,
-      version: "0.2.0",
+      version: "0.2.2",
       command: "detect",
       ok: true,
     });
     expect(plan).toMatchObject({
       schemaVersion: 1,
-      version: "0.2.0",
+      version: "0.2.2",
       command: "plan",
       ok: true,
     });
@@ -650,7 +650,7 @@ describe("runCli", () => {
       join(root, ".loom/project.json"),
       `${JSON.stringify({
         schemaVersion: 1,
-        version: "0.2.0",
+        version: "0.2.2",
         project: detectProject(root),
       })}\n`,
     );
@@ -725,7 +725,7 @@ describe("runCli", () => {
       JSON.parse(await readFile(join(root, ".loom/project.json"), "utf8")),
     ).toMatchObject({
       schemaVersion: 1,
-      version: "0.2.0",
+      version: "0.2.2",
     });
     expect(await exists(join(root, ".loom/workflow.json"))).toBe(true);
     expect(await exists(join(root, ".loom/capabilities.lock.json"))).toBe(true);
@@ -1002,7 +1002,7 @@ describe("runCli", () => {
       join(root, ".loom/workflow.json"),
       JSON.stringify({
         schemaVersion: 1,
-        version: "0.2.0",
+        version: "0.2.2",
         harnesses: { codex: {}, claude: {} },
       }),
     );
