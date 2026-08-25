@@ -21,10 +21,18 @@ pnpm build
 Use the built CLI from a project directory:
 
 ```sh
+/path/to/loom/packages/cli/dist/index.js
 /path/to/loom/packages/cli/dist/index.js detect
 /path/to/loom/packages/cli/dist/index.js connect --harness opencode
 /path/to/loom/packages/cli/dist/index.js doctor --harness opencode
 ```
+
+Running `loom` in a terminal opens a guided menu for setup, doctor, removal, and
+help. Guided setup detects the project, asks for OpenCode, Codex, Claude Code,
+OMP, or Antigravity, connects Loom when needed, then prints the exact prompt to
+give the selected agent. Flutter package-intelligence automation is verified on
+OpenCode; the handoff asks it to discover and explicitly select task-relevant
+skills before it produces the reviewed setup command.
 
 Restart OpenCode, then ask `Set up this project with Loom` or run `/loom:setup`.
 For Flutter, the host LLM searches locked package and registry skills with

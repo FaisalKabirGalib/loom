@@ -108,6 +108,115 @@ afterEach(async () => {
 });
 
 describe("runCli", () => {
+  it("keeps bare Loom non-interactive usage safe", async () => {
+    const root = await fixture();
+    const result = await invoke(root, [], { isTTY: false });
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Usage: loom [command]");
+  });
+
+  it("rejects an unlisted interactive choice", async () => {
+    const root = await fixture();
+    const result = await invoke(root, [], {
+      isTTY: true,
+      select: async () => "not a choice",
+    });
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("usage.invalid-selection");
+  });
+
+  it("guides a Flutter project through OpenCode setup and agent handoff", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    const choices = ["set up this project", "opencode"];
+    const result = await invoke(root, [], {
+      isTTY: true,
+      confirm: async () => true,
+      select: async (_prompt, options) => {
+        const choice = choices.shift();
+        expect(options).toContain(choice);
+        return choice!;
+      },
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(
+      "Flutter package-intelligence is verified on OpenCode.",
+    );
+    expect(result.stdout).toContain("Connect (opencode)");
+    expect(result.stdout).toContain("restart OpenCode");
+    expect(result.stdout).toContain("Search relevant package skills");
+    expect(await exists(join(root, "opencode.json"))).toBe(true);
+  });
+
+  it.each([
+    ["opencode", "opencode.json"],
+    ["codex", ".codex/config.toml"],
+    ["claude", ".mcp.json"],
+    ["omp", ".omp/mcp.json"],
+    ["antigravity", ".agents/mcp_config.json"],
+  ])("offers %s through guided setup", async (harness, config) => {
+    const root = await fixture();
+    const choices = ["set up this project", harness];
+    const result = await invoke(root, [], {
+      isTTY: true,
+      confirm: async () => true,
+      select: async () => choices.shift()!,
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain(`Connect (${harness})`);
+    expect(await exists(join(root, config))).toBe(true);
+  });
+
+  it("does not connect when guided setup is cancelled", async () => {
+    const root = await fixture();
+    const choices = ["set up this project", "opencode"];
+    const result = await invoke(root, [], {
+      isTTY: true,
+      confirm: async () => false,
+      select: async () => choices.shift()!,
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Setup cancelled.");
+    expect(await exists(join(root, "opencode.json"))).toBe(false);
+  });
+
+  it("blocks agent handoff for a broken existing harness", async () => {
+    const root = await fixture();
+    expect(
+      (await invoke(root, ["connect", "--harness", "opencode"])).code,
+    ).toBe(0);
+    await writeFile(join(root, ".opencode/plugins/loom.ts"), "tampered\n");
+    const choices = ["set up this project", "opencode"];
+    const result = await invoke(root, [], {
+      isTTY: true,
+      select: async () => choices.shift()!,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain("Cannot use opencode");
+    expect(result.stdout).not.toContain("Next: restart OpenCode");
+  });
+
+  it("runs doctor from the interactive menu", async () => {
+    const root = await fixture();
+    const choices = ["doctor", "opencode"];
+    const result = await invoke(root, [], {
+      isTTY: true,
+      select: async () => choices.shift()!,
+    });
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Doctor (opencode)");
+  });
+
   it("returns stable JSON without mutating detection or planning", async () => {
     const root = await fixture();
     const detected = await invoke(root, ["detect", "--json"]);

@@ -117,6 +117,7 @@ export interface RunCliOptions {
   now?: () => Date;
   isTTY?: boolean;
   confirm?: (prompt: string) => Promise<boolean>;
+  select?: (prompt: string, choices: readonly string[]) => Promise<string>;
   installerFactory?: (dartPath: string, gitPath: string) => SetupInstaller;
   resolveExecutable?: (
     name: string,
@@ -309,6 +310,7 @@ interface CommandContext {
   now: () => Date;
   isTTY: boolean;
   confirm: (prompt: string) => Promise<boolean>;
+  select: (prompt: string, choices: readonly string[]) => Promise<string>;
   installerFactory: (dartPath: string, gitPath: string) => SetupInstaller;
   resolveExecutable: (
     name: string,
@@ -337,7 +339,7 @@ class CliError extends Error {
   }
 }
 
-const usage = `Usage: loom <command>
+const usage = `Usage: loom [command]
 
 Commands:
   detect [--json]
@@ -356,7 +358,9 @@ Commands:
   registry sync|status
   upgrades
   upgrade --review
-  mcp`;
+  mcp
+
+Run \`loom\` in a terminal for guided setup.`;
 
 function parseArguments(args: readonly string[]): ParsedArguments {
   const positionals: string[] = [];
@@ -493,6 +497,127 @@ function adapterFor(id: string | undefined): HarnessAdapter {
     "usage.invalid-harness",
     `Unsupported harness: ${harness}`,
     EXIT_USAGE,
+  );
+}
+
+const harnessChoices = [
+  "opencode",
+  "codex",
+  "claude",
+  "omp",
+  "antigravity",
+] as const;
+
+async function selectHarness(context: CommandContext): Promise<string> {
+  return selectChoice(context, "Choose an agent harness", harnessChoices);
+}
+
+async function selectChoice(
+  context: CommandContext,
+  prompt: string,
+  choices: readonly string[],
+): Promise<string> {
+  const choice = await context.select(prompt, choices);
+  if (!choices.includes(choice))
+    throw new CliError(
+      "usage.invalid-selection",
+      "Choose a listed option",
+      EXIT_USAGE,
+    );
+  return choice;
+}
+
+function agentInstructions(harness: string, flutter: boolean): string[] {
+  if (flutter && harness === "opencode")
+    return [
+      "Next: restart OpenCode in this project, then ask:",
+      '  "Set up this Flutter project with Loom. Search relevant package skills, select only what this task needs, and run the reviewed Loom setup command."',
+    ];
+  return [
+    `Next: open ${harness} in this project, then ask:`,
+    '  "Use Loom to inspect this project and recommend the next setup steps."',
+    ...(flutter
+      ? [
+          "Flutter package-intelligence automation is currently verified on OpenCode.",
+        ]
+      : []),
+  ];
+}
+
+async function guidedSetup(context: CommandContext): Promise<number> {
+  const project = detectProject(context.root);
+  const flutter = project.frameworks.includes("flutter");
+  printLines(context.stdout, [
+    "Guided setup",
+    `  detected ${project.frameworks.join(", ") || project.languages.join(", ") || "no known stack"}`,
+    ...(flutter
+      ? ["  Flutter package-intelligence is verified on OpenCode."]
+      : []),
+  ]);
+  const harness = await selectHarness(context);
+  const adapter = adapterFor(harness);
+  const state = await adapter.inspect(context.root);
+  if (hasErrors(state.diagnostics)) {
+    printLines(context.stdout, [
+      `Cannot use ${harness} until its Loom configuration is fixed.`,
+      ...state.diagnostics.map((item) => `  ${item.code}: ${item.message}`),
+    ]);
+    return EXIT_ERROR;
+  }
+  if (!state.installed) {
+    if (!(await context.confirm(`Connect Loom to ${harness}?`))) {
+      printLines(context.stdout, ["Setup cancelled."]);
+      return 0;
+    }
+    const result = await connectCommand(
+      { positionals: [], flags: new Map([["harness", [harness]]]) },
+      context,
+    );
+    if (result !== 0) return result;
+  } else {
+    const verification = await adapter.verify(context.root);
+    if (hasErrors(verification)) {
+      printLines(context.stdout, [
+        `Cannot use ${harness} until its Loom configuration is fixed.`,
+        ...verification.map((item) => `  ${item.code}: ${item.message}`),
+        `Run \`loom doctor --harness ${harness}\` for details.`,
+      ]);
+      return EXIT_ERROR;
+    }
+    printLines(context.stdout, [`Loom is already connected to ${harness}.`]);
+  }
+  printLines(context.stdout, agentInstructions(harness, flutter));
+  return 0;
+}
+
+async function interactiveCommand(context: CommandContext): Promise<number> {
+  if (!context.isTTY) throw usageError();
+  const action = await selectChoice(context, "Choose an action", [
+    "set up this project",
+    "doctor",
+    "remove Loom",
+    "help",
+    "exit",
+  ]);
+  if (action === "set up this project") return guidedSetup(context);
+  if (action === "help") {
+    printLines(context.stdout, [usage]);
+    return 0;
+  }
+  if (action === "exit") return 0;
+  const harness = await selectHarness(context);
+  if (action === "doctor")
+    return doctorCommand(
+      { positionals: [], flags: new Map([["harness", [harness]]]) },
+      context,
+    );
+  if (!(await context.confirm(`Remove Loom from ${harness}?`))) {
+    printLines(context.stdout, ["Removal cancelled."]);
+    return 0;
+  }
+  return removeCommand(
+    { positionals: [], flags: new Map([["harness", [harness]]]) },
+    context,
   );
 }
 
@@ -2034,6 +2159,39 @@ async function confirmInTerminal(prompt: string): Promise<boolean> {
   }
 }
 
+async function selectInTerminal(
+  prompt: string,
+  choices: readonly string[],
+): Promise<string> {
+  const terminal = createInterface({
+    input: process.stdin,
+    output: process.stderr,
+  });
+  try {
+    const rendered = choices.map((choice, index) => `${index + 1}. ${choice}`);
+    const answer = await terminal.question(
+      `${prompt}\n${rendered.join("\n")}\n> `,
+    );
+    if (!/^\d+$/u.test(answer.trim()))
+      throw new CliError(
+        "usage.invalid-selection",
+        "Choose a listed option",
+        EXIT_USAGE,
+      );
+    const selected = Number(answer.trim());
+    const choice = choices[selected - 1];
+    if (choice === undefined)
+      throw new CliError(
+        "usage.invalid-selection",
+        "Choose a listed option",
+        EXIT_USAGE,
+      );
+    return choice;
+  } finally {
+    terminal.close();
+  }
+}
+
 export async function runCli(
   args: readonly string[] = process.argv.slice(2),
   options: RunCliOptions = {},
@@ -2046,6 +2204,7 @@ export async function runCli(
     now: options.now ?? (() => new Date()),
     isTTY: options.isTTY ?? process.stdin.isTTY === true,
     confirm: options.confirm ?? confirmInTerminal,
+    select: options.select ?? selectInTerminal,
     installerFactory:
       options.installerFactory ??
       ((dartPath, gitPath) => new CapabilityInstaller({ dartPath, gitPath })),
@@ -2056,9 +2215,10 @@ export async function runCli(
   };
   let command = args[0] ?? "";
   try {
-    if (command === "" || command === "help" || command === "--help") {
+    if (command === "") return await interactiveCommand(context);
+    if (command === "help" || command === "--help") {
       printLines(context.stdout, [usage]);
-      return command === "" ? EXIT_USAGE : 0;
+      return 0;
     }
     const parsed = parseArguments(args.slice(1));
     switch (command) {
