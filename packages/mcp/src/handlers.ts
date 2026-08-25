@@ -31,6 +31,7 @@ import {
   capabilityQuerySchema,
   planProject,
   discoverFlutterSkills,
+  frameworkRecommendations,
   flutterSkillBindingHash,
   registryVersionSchema,
   type CapabilityQueryInput,
@@ -266,7 +267,11 @@ export function createLoomToolHandlers(
     async projectPlan(rawInput) {
       const input = projectPlanInputSchema.parse(rawInput);
       const { resolution, discovery } = await runPlan(input);
-      return { ...resolution, discovery };
+      return {
+        ...resolution,
+        frameworkRecommendations: frameworkRecommendations(resolution.project),
+        discovery,
+      };
     },
 
     async explain(rawInput) {
@@ -301,6 +306,7 @@ export function createLoomToolHandlers(
         })),
         uncovered: resolution.plan.uncovered,
         requiredApprovals: resolution.plan.requiredApprovals,
+        frameworkRecommendations: frameworkRecommendations(resolution.project),
         discovery,
       };
     },
@@ -338,6 +344,9 @@ export function createLoomToolHandlers(
             ...(discovery["warnings"] as string[]),
             ...search.warnings,
           ],
+          frameworkRecommendations: frameworkRecommendations(
+            resolution.project,
+          ),
         };
       }
       const requestedSelections = input.selectedSkills ?? [];
@@ -404,6 +413,7 @@ export function createLoomToolHandlers(
         uncovered: resolution.plan.uncovered,
         warnings: discovery["warnings"],
         skillSelections: selectedSkills,
+        frameworkRecommendations: frameworkRecommendations(resolution.project),
       };
     },
 

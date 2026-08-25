@@ -248,6 +248,79 @@ describe("runCli", () => {
     expect(await exists(join(root, ".loom"))).toBe(false);
   });
 
+  it.each([
+    [
+      "generic TypeScript",
+      { devDependencies: { typescript: "7.0.2" } },
+      [
+        "loom-project-setup",
+        "builtin:web-agent-intelligence",
+        "builtin:context7",
+      ],
+    ],
+    [
+      "Next and React",
+      { dependencies: { next: "16.0.0", react: "19.0.0" } },
+      ["builtin:web-agent-intelligence", "builtin:context7"],
+    ],
+    [
+      "Flutter",
+      undefined,
+      ["builtin:flutter-package-intelligence", "flutter-package-skills"],
+    ],
+  ])(
+    "includes framework recommendations for %s",
+    async (_name, manifest, expected) => {
+      const root = await fixture();
+      if (manifest !== undefined)
+        await writeFile(
+          join(root, "package.json"),
+          `${JSON.stringify(manifest)}\n`,
+        );
+      else
+        await writeFile(
+          join(root, "pubspec.yaml"),
+          "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+        );
+
+      const result = await invoke(root, ["plan", "--json"]);
+      const data = (
+        JSON.parse(result.stdout) as { data: Record<string, unknown> }
+      ).data;
+      const recommendations = data.frameworkRecommendations as Record<
+        string,
+        Array<{ id: string }>
+      >;
+      const suggestions = recommendations.suggested ?? [];
+      const ids = Object.values(recommendations)
+        .flat()
+        .map((item) => item.id);
+
+      expect(result.code).toBe(0);
+      for (const value of expected) {
+        if (["defaults", "installable", "suggested"].includes(value))
+          expect(recommendations).toHaveProperty(value);
+        else expect(ids).toContain(value);
+      }
+      const selected = (
+        data.plan as { selected: Array<{ candidate: { id: string } }> }
+      ).selected.map((item) => item.candidate.id);
+      if (suggestions.length > 0)
+        expect(selected).not.toEqual(
+          expect.arrayContaining(suggestions.map((item) => item.id)),
+        );
+      if (_name === "generic TypeScript")
+        expect(
+          (recommendations.installable ?? []).find(
+            ({ id }) => id === "builtin:web-agent-intelligence",
+          ),
+        ).toMatchObject({
+          manualCommand:
+            "AGENT_BROWSER_EXECUTABLE_PATH must point to a project-local verified executable; Loom will not download browser.",
+        });
+    },
+  );
+
   it("keeps dry-run mutation free", async () => {
     const root = await fixture();
     const result = await invoke(root, [
@@ -1039,5 +1112,39 @@ describe("runCli", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("setup.node-unavailable");
+  });
+
+  it("rejects Flutter package intelligence outside OpenCode before installation", async () => {
+    const root = await fixture();
+    await writeFile(
+      join(root, "pubspec.yaml"),
+      "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    expect((await invoke(root, ["connect", "--harness", "codex"])).code).toBe(
+      0,
+    );
+    const intent = encodeSetupIntent({
+      schemaVersion: 1,
+      root,
+      projectFingerprint: setupFingerprint(root),
+      harness: "codex",
+      mode: "apply",
+      requestedCapabilities: await setupCapabilities(root),
+      selectedSkills: [],
+      selectionRationale: "No package skill is relevant to this test",
+    });
+
+    const result = await invoke(root, [
+      "setup",
+      "--dry-run",
+      "--intent",
+      intent,
+    ]);
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("setup.unsupported-harness");
+    expect(result.stderr).toContain(
+      "Flutter/Dart package intelligence is supported on OpenCode only.",
+    );
   });
 });

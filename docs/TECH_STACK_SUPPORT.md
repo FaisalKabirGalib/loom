@@ -232,6 +232,19 @@ a receipt. Failures roll back ownership-safe mutations.
 Other catalog and network candidates remain recommendations because
 `setupCommand()` rejects candidates without an audited recipe.
 
+## Framework Recommendations
+
+`loom plan`, `loom explain`, and the MCP planning responses include
+deterministic framework recommendations in three groups. **Defaults** are
+fitting bundled Loom skills. **Installable** entries name only audited recipes;
+Flutter/Dart package intelligence, the Dart MCP, and the pub.dev explorer are
+explicitly OpenCode-only. Web recommendations identify the audited
+`agent-browser` plus `opensrc` recipe for supported harnesses and state that
+browser provisioning is a prerequisite. **Suggested** entries (such as Context7,
+Chrome DevTools, Storybook, shadcn, and task-selected Flutter package skills)
+are manual discovery guidance only. They are never added to capability selection
+or made executable by a recommendation.
+
 ## Where to Modify Behavior
 
 | Desired change                           | Primary file                                                 | Also review                                                     |

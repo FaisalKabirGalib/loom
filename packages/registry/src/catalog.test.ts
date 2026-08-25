@@ -1,9 +1,30 @@
 import { ALL_CAPABILITIES } from "@loom/core";
 import { describe, expect, it } from "vitest";
 
-import { BUILTIN_CATALOG } from "./catalog.js";
+import {
+  BUILTIN_CATALOG,
+  BUILTIN_CATALOG_SECTIONS,
+  CATALOG_CATEGORIES,
+} from "./catalog.js";
 
 describe("BUILTIN_CATALOG", () => {
+  it("groups candidates into stable readable categories", () => {
+    expect(BUILTIN_CATALOG_SECTIONS.map(({ category }) => category)).toEqual(
+      CATALOG_CATEGORIES.filter((category) =>
+        BUILTIN_CATALOG_SECTIONS.some(
+          (section) => section.category === category,
+        ),
+      ),
+    );
+    expect(
+      new Set(
+        BUILTIN_CATALOG_SECTIONS.flatMap(({ candidates }) =>
+          candidates.map(({ id }) => id),
+        ),
+      ),
+    ).toEqual(new Set(BUILTIN_CATALOG.map(({ id }) => id)));
+  });
+
   it("contains the specification and framework-profile seeds with canonical capabilities", () => {
     const names = new Set(BUILTIN_CATALOG.map((candidate) => candidate.name));
     for (const name of [

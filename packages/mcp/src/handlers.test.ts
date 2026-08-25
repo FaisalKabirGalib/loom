@@ -192,6 +192,32 @@ describe("createLoomToolHandlers", () => {
     expect(intent).not.toHaveProperty("url");
   });
 
+  it("recommends the local browser prerequisite for generic TypeScript", async () => {
+    const root = await mkdtemp(join(tmpdir(), "loom-mcp-web-"));
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ devDependencies: { typescript: "7.0.2" } }),
+    );
+    const handlers = createLoomToolHandlers({ cwd: () => root });
+
+    const result = await handlers.projectPlan({});
+    const recommendations = result.frameworkRecommendations as {
+      installable: Array<{ id: string; manualCommand?: string }>;
+    };
+
+    expect(recommendations.installable).toContainEqual({
+      id: "builtin:web-agent-intelligence",
+      framework: "typescript",
+      name: "Web agent intelligence",
+      kind: "tool",
+      status: "installable",
+      rationale:
+        "Audited pinned agent-browser MCP and opensrc skill recipe for supported harnesses.",
+      manualCommand:
+        "AGENT_BROWSER_EXECUTABLE_PATH must point to a project-local verified executable; Loom will not download browser.",
+    });
+  });
+
   it("requires explicit LLM selection from exact locked package skills", async () => {
     const root = await mkdtemp(join(tmpdir(), "loom-mcp-flutter-"));
     const packageRoot = join(root, "cache/example_pkg-2.3.4");

@@ -72,7 +72,9 @@ import {
   planProject,
   syncRegistryCache,
   discoverFlutterSkills,
+  frameworkRecommendations,
   flutterSkillBindingHash,
+  isWebAgentIntelligenceEligible,
   type ProjectResolution,
   type RegistrySnapshot,
 } from "@loom/registry";
@@ -654,6 +656,27 @@ function planLines(resolution: ProjectResolution): string[] {
   ];
 }
 
+function frameworkRecommendationLines(resolution: ProjectResolution): string[] {
+  const recommendations = frameworkRecommendations(resolution.project);
+  const groups = [
+    ["Defaults", recommendations.defaults],
+    ["Installable", recommendations.installable],
+    ["Suggested", recommendations.suggested],
+  ] as const;
+  return [
+    "Framework recommendations",
+    ...groups.flatMap(([label, items]) => [
+      `  ${label}`,
+      ...(items.length === 0
+        ? ["    none"]
+        : items.map(
+            (item) =>
+              `    ${item.framework}  ${item.id}  ${item.rationale}${item.manualCommand === undefined ? "" : ` (${item.manualCommand})`}`,
+          )),
+    ]),
+  ];
+}
+
 async function resolvePlan(
   root: string,
   task?: string,
@@ -698,6 +721,7 @@ async function planCommand(
     : undefined;
   const data = {
     ...resolution,
+    frameworkRecommendations: frameworkRecommendations(resolution.project),
     ...(harnessPlan === undefined
       ? {}
       : {
@@ -712,7 +736,10 @@ async function planCommand(
   if (flag(parsed, "json"))
     printJson(context.stdout, jsonEnvelope("plan", data));
   else {
-    const lines = planLines(resolution);
+    const lines = [
+      ...planLines(resolution),
+      ...frameworkRecommendationLines(resolution),
+    ];
     if (harnessPlan)
       lines.push(
         "Harness",
@@ -734,7 +761,11 @@ async function explainCommand(
   assertFlags(parsed, []);
   if (parsed.positionals.length !== 0) throw usageError();
   const resolution = await resolvePlan(context.root, undefined, context.env);
-  const lines = [...planLines(resolution), "Decisions"];
+  const lines = [
+    ...planLines(resolution),
+    ...frameworkRecommendationLines(resolution),
+    "Decisions",
+  ];
   for (const item of resolution.plan.selected)
     lines.push(
       `  select ${item.candidate.id}: ${item.reasons.join("; ") || "required coverage"}`,
@@ -1091,11 +1122,12 @@ async function setupCommand(
   const flutter = resolution.project.frameworks.some(
     (name) => name === "flutter" || name === "dart",
   );
-  const web =
-    resolution.project.languages.includes("typescript") ||
-    resolution.project.frameworks.some((name) =>
-      ["react", "next.js", "vite", "astro"].includes(name),
+  if (flutter && intent.harness !== FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.harness)
+    throw new CliError(
+      "setup.unsupported-harness",
+      "Flutter/Dart package intelligence is supported on OpenCode only.",
     );
+  const web = isWebAgentIntelligenceEligible(resolution.project);
   const auditedCandidate = flutter
     ? FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate
     : web

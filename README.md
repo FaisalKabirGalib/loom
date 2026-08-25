@@ -64,6 +64,11 @@ ownership-hashed project-local executable compiled after clearing and refetching
 the enforced package cache. Other candidates remain recommendations until they
 have an audited typed recipe.
 
+`loom plan` and `loom explain` also print **Framework recommendations**. These
+are deterministic and split into Loom defaults, audited installable recipes, and
+manual suggestions. Suggestions never become setup candidates: they require
+separate review and a manual discovery command.
+
 Apply refuses plans with uncovered requirements or selected candidates that do
 not have an exact version/revision. This prevents an unresolved catalog
 recommendation from being recorded as reproducible or active.

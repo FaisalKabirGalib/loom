@@ -9,6 +9,26 @@ import {
 
 type RuntimeKind = NonNullable<CapabilityCandidate["runtime"]>["kind"];
 
+export const CATALOG_CATEGORIES = [
+  "code-intelligence",
+  "documentation",
+  "web-ui",
+  "mobile",
+  "api",
+  "security",
+  "data",
+  "operations",
+  "frameworks",
+] as const;
+
+export type CatalogCategory = (typeof CATALOG_CATEGORIES)[number];
+
+export interface CatalogSection {
+  category: CatalogCategory;
+  label: string;
+  candidates: readonly CapabilityCandidate[];
+}
+
 interface Seed {
   id: string;
   name: string;
@@ -102,6 +122,7 @@ const database = {
 } satisfies Partial<Permissions>;
 
 const seeds: Seed[] = [
+  // Code intelligence
   {
     id: "codanna",
     name: "Codanna",
@@ -1116,4 +1137,50 @@ const seeds: Seed[] = [
   },
 ];
 
+const categoryFor = (candidate: CapabilityCandidate): CatalogCategory => {
+  if (
+    candidate.ecosystems.some((value) =>
+      ["flutter", "dart", "react-native", "expo", "mobile"].includes(value),
+    )
+  )
+    return "mobile";
+  if (
+    candidate.ecosystems.some((value) =>
+      ["laravel", "php", "go", "gopls"].includes(value),
+    )
+  )
+    return "frameworks";
+  const namespaces = new Set(
+    candidate.provides.map((capability) => capability.split(".")[0]),
+  );
+  if (namespaces.has("UI")) return "web-ui";
+  if (namespaces.has("API")) return "api";
+  if (namespaces.has("SECURITY")) return "security";
+  if (namespaces.has("DATA")) return "data";
+  if (namespaces.has("OPS")) return "operations";
+  if (namespaces.has("DOCS")) return "documentation";
+  return "code-intelligence";
+};
+
+const categoryLabels: Record<CatalogCategory, string> = {
+  "code-intelligence": "Code intelligence",
+  documentation: "Documentation and source context",
+  "web-ui": "Web and UI",
+  mobile: "Flutter, Dart, and mobile",
+  api: "API and testing",
+  security: "Security and quality",
+  data: "Data and databases",
+  operations: "Operations and deployment",
+  frameworks: "Framework-specific tooling",
+};
+
 export const BUILTIN_CATALOG: readonly CapabilityCandidate[] = seeds.map(seed);
+
+export const BUILTIN_CATALOG_SECTIONS: readonly CatalogSection[] =
+  CATALOG_CATEGORIES.map((category) => ({
+    category,
+    label: categoryLabels[category],
+    candidates: BUILTIN_CATALOG.filter(
+      (candidate) => categoryFor(candidate) === category,
+    ),
+  })).filter((section) => section.candidates.length > 0);

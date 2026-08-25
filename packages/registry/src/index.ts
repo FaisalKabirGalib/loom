@@ -3,6 +3,7 @@ export * from "./cache.js";
 export * from "./catalog.js";
 export * from "./filter.js";
 export * from "./flutter-skills.js";
+export * from "./framework-recommendations.js";
 export * from "./github.js";
 export * from "./github-skill.js";
 export * from "./inference.js";
