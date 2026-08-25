@@ -62,6 +62,28 @@ describe("CodexHarnessAdapter", () => {
     expect(await adapter.verify(root)).toEqual([]);
   });
 
+  it("emits one sorted agent-browser environment table", async () => {
+    const { root, adapter } = await fixture();
+    await adapter.apply(
+      await adapter.planInstall(root, plan, {
+        mcp: {
+          name: "agent-browser",
+          command: "/tool/agent-browser",
+          args: ["mcp"],
+          env: { ZEBRA: "z", ALPHA: "a" },
+        },
+      }),
+    );
+
+    const config = await readFile(resolve(root, ".codex/config.toml"), "utf8");
+    expect(config.match(/\[mcp_servers\.agent-browser\.env\]/g)).toHaveLength(
+      1,
+    );
+    expect(config).toContain(
+      '[mcp_servers.agent-browser.env]\nALPHA = "a"\nZEBRA = "z"\n',
+    );
+  });
+
   it("rejects an existing mcp_servers.loom table", async () => {
     const { root, adapter } = await fixture();
     await mkdir(resolve(root, ".codex"));

@@ -20,6 +20,7 @@ import {
   type Diagnostic,
   type HarnessAdapter,
   type HarnessState,
+  type LoomResources,
 } from "@loom/core";
 
 export const ANTIGRAVITY_VERSION = "2.9.1";
@@ -28,6 +29,7 @@ export const ANTIGRAVITY_CONFIG_PATH = ".agents/mcp_config.json";
 
 const OWNERSHIP_PATH = ".loom/ownership.json";
 const POINTER_KEY = "mcpServers.loom";
+const AGENT_BROWSER_POINTER_KEY = "mcpServers.agent-browser";
 
 interface OwnedPointer {
   path: typeof ANTIGRAVITY_CONFIG_PATH;
@@ -37,7 +39,8 @@ interface OwnedPointer {
 
 interface AntigravityOwnership {
   files: Record<string, string>;
-  pointers: Record<typeof POINTER_KEY, OwnedPointer>;
+  pointers: Record<typeof POINTER_KEY, OwnedPointer> &
+    Partial<Record<typeof AGENT_BROWSER_POINTER_KEY, OwnedPointer>>;
 }
 
 interface OwnershipManifest {
@@ -50,6 +53,7 @@ interface OwnershipManifest {
 interface ServerValue {
   command: string;
   args: string[];
+  env?: Record<string, string>;
 }
 
 export interface AntigravityAdapterOptions {
@@ -236,18 +240,23 @@ function parseOwnership(content: string | undefined): OwnershipManifest {
         throw new Error("Invalid Antigravity owned file");
       }
     }
-    if (Object.keys(owned.pointers).length !== 1) {
-      throw new Error("Invalid Antigravity owned pointer");
-    }
-    const pointer = owned.pointers[POINTER_KEY];
     if (
-      !isRecord(pointer) ||
-      pointer.path !== ANTIGRAVITY_CONFIG_PATH ||
-      typeof pointer.created !== "boolean" ||
-      !isServerValue(pointer.value)
+      Object.keys(owned.pointers).some(
+        (key) => key !== POINTER_KEY && key !== AGENT_BROWSER_POINTER_KEY,
+      )
     ) {
       throw new Error("Invalid Antigravity owned pointer");
     }
+    if (owned.pointers[POINTER_KEY] === undefined)
+      throw new Error("Invalid Antigravity owned pointer");
+    for (const pointer of Object.values(owned.pointers))
+      if (
+        !isRecord(pointer) ||
+        pointer.path !== ANTIGRAVITY_CONFIG_PATH ||
+        typeof pointer.created !== "boolean" ||
+        !isServerValue(pointer.value)
+      )
+        throw new Error("Invalid Antigravity owned pointer");
   }
   return value as unknown as OwnershipManifest;
 }
@@ -262,18 +271,19 @@ function isServerValue(value: unknown): value is ServerValue {
   );
 }
 
-function pointerValue(config: Record<string, unknown>): unknown {
-  return isRecord(config.mcpServers) ? config.mcpServers.loom : undefined;
+function pointerValue(config: Record<string, unknown>, name: string): unknown {
+  return isRecord(config.mcpServers) ? config.mcpServers[name] : undefined;
 }
 
 function setPointer(
   config: Record<string, unknown>,
+  name: string,
   value: ServerValue | undefined,
 ): Record<string, unknown> {
   const next = structuredClone(config);
   const servers = isRecord(next.mcpServers) ? { ...next.mcpServers } : {};
-  if (value === undefined) delete servers.loom;
-  else servers.loom = value;
+  if (value === undefined) delete servers[name];
+  else servers[name] = value;
   if (Object.keys(servers).length === 0) delete next.mcpServers;
   else next.mcpServers = servers;
   return next;
@@ -458,6 +468,7 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
   async planInstall(
     root: string,
     _plan: CapabilityPlan,
+    resources?: LoomResources,
   ): Promise<ConfigMutationPlan> {
     const projectRoot = resolve(root);
     const diagnostics: Diagnostic[] = [];
@@ -489,6 +500,11 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
     let desiredFiles: Record<string, string> = {};
     try {
       desiredFiles = await collectSkills(this.#source);
+      if (resources?.skill !== undefined) {
+        const path = `.agents/skills/${resources.skill.name}/SKILL.md`;
+        if (!isSkillPath(path)) throw new Error("Invalid Loom resource skill");
+        desiredFiles[path] = resources.skill.content;
+      }
     } catch (error) {
       diagnostics.push(
         diagnostic(
@@ -609,7 +625,7 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
     }
     const ownedPointer = previous?.pointers[POINTER_KEY];
     if (config !== undefined) {
-      const current = pointerValue(config);
+      const current = pointerValue(config, "loom");
       if (
         ownedPointer !== undefined &&
         !sameValue(current, ownedPointer.value)
@@ -630,7 +646,49 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
           ),
         );
       } else {
-        const nextConfig = stringify(setPointer(config, desiredServer));
+        const ownedAgentBrowser = previous?.pointers[AGENT_BROWSER_POINTER_KEY];
+        const desiredAgentBrowser =
+          resources?.mcp === undefined
+            ? undefined
+            : {
+                command: resources.mcp.command,
+                args: [...resources.mcp.args],
+                env: { ...resources.mcp.env },
+              };
+        const currentAgentBrowser = pointerValue(config, "agent-browser");
+        if (
+          ownedAgentBrowser !== undefined &&
+          !sameValue(currentAgentBrowser, ownedAgentBrowser.value)
+        )
+          diagnostics.push(
+            diagnostic(
+              "antigravity.owned-pointer-modified",
+              "Refusing to overwrite modified owned mcpServers.agent-browser config",
+              ANTIGRAVITY_CONFIG_PATH,
+            ),
+          );
+        else if (
+          desiredAgentBrowser !== undefined &&
+          ownedAgentBrowser === undefined &&
+          currentAgentBrowser !== undefined
+        )
+          diagnostics.push(
+            diagnostic(
+              "antigravity.mcp-collision",
+              "mcpServers.agent-browser already exists and is not owned by Loom",
+              ANTIGRAVITY_CONFIG_PATH,
+            ),
+          );
+        const nextConfig = stringify(
+          setPointer(
+            setPointer(config, "loom", desiredServer),
+            "agent-browser",
+            desiredAgentBrowser ??
+              (ownedAgentBrowser === undefined
+                ? (currentAgentBrowser as ServerValue | undefined)
+                : undefined),
+          ),
+        );
         if (nextConfig !== configContent) {
           mutations.push(
             mutation(
@@ -665,9 +723,24 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
           path: ANTIGRAVITY_CONFIG_PATH,
           value: desiredServer,
           created:
-            previous?.pointers[POINTER_KEY].created ??
+            previous?.pointers[POINTER_KEY]?.created ??
             configContent === undefined,
         },
+        ...(resources?.mcp === undefined
+          ? {}
+          : {
+              [AGENT_BROWSER_POINTER_KEY]: {
+                path: ANTIGRAVITY_CONFIG_PATH,
+                value: {
+                  command: resources.mcp.command,
+                  args: [...resources.mcp.args],
+                  env: { ...resources.mcp.env },
+                },
+                created:
+                  previous?.pointers[AGENT_BROWSER_POINTER_KEY]?.created ??
+                  configContent === undefined,
+              },
+            }),
       },
     };
     const nextOwnership = `${JSON.stringify(ownership, null, 2)}\n`;
@@ -926,7 +999,15 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
     } else {
       try {
         const config = parseObject(configContent, pointer.path);
-        if (!sameValue(pointerValue(config), pointer.value)) {
+        if (
+          Object.entries(owned.pointers).some(
+            ([key, ownedPointer]) =>
+              !sameValue(
+                pointerValue(config, key.split(".")[1]!),
+                ownedPointer.value,
+              ),
+          )
+        ) {
           diagnostics.push(
             diagnostic(
               "antigravity.config-modified",
@@ -1011,7 +1092,15 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
     if (configContent !== undefined) {
       try {
         const config = parseObject(configContent, pointer.path);
-        if (!sameValue(pointerValue(config), pointer.value)) {
+        if (
+          Object.entries(owned.pointers).some(
+            ([key, ownedPointer]) =>
+              !sameValue(
+                pointerValue(config, key.split(".")[1]!),
+                ownedPointer.value,
+              ),
+          )
+        ) {
           diagnostics.push(
             diagnostic(
               "antigravity.config-modified",
@@ -1020,7 +1109,10 @@ export class AntigravityHarnessAdapter implements HarnessAdapter {
             ),
           );
         } else {
-          const nextConfig = setPointer(config, undefined);
+          const nextConfig = Object.keys(owned.pointers).reduce(
+            (next, key) => setPointer(next, key.split(".")[1]!, undefined),
+            config,
+          );
           if (pointer.created && Object.keys(nextConfig).length === 0) {
             mutations.push(
               mutation(

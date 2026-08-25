@@ -13,8 +13,8 @@ Loom support has four separate levels:
 
 A technology being detected does not mean Loom automatically installs tools for
 it. Loom currently detects many stacks, has seven stack profiles, and can
-recommend a broad catalog. The only audited external setup recipe is
-Flutter/Dart on OpenCode.
+recommend a broad catalog. Audited external setup recipes are Flutter/Dart on
+OpenCode and a project-local web-agent-intelligence boundary.
 
 ## Detected Technologies
 
@@ -193,8 +193,14 @@ delete files or configuration pointers that changed after Loom wrote them.
 
 ## What `loom setup` Installs Today
 
-The audited setup path currently supports only Flutter/Dart projects on
-OpenCode.
+The audited setup paths support Flutter/Dart projects on OpenCode and a
+project-local web-agent-intelligence boundary for TypeScript/React/Next.js/Vite/
+Astro. The web boundary pins `agent-browser@0.34.0` and `opensrc@0.7.3` to npm
+SRI values, requires installed Node/npm, uses `--ignore-scripts` and no `npx`,
+and writes only `.loom/tools/web-agent-intelligence`. Browser provisioning is a
+manual reviewed command because upstream browser artifacts are not locked by the
+npm package integrity. OpenSrc is instruction-only (`--modify=false`); it is
+never automatically fetched or allowed to modify source.
 
 It installs:
 

@@ -46,6 +46,13 @@ Loom connects its own nine-tool stdio MCP server and eight bundled,
 instruction-only skills. Capability plans and registry discovery do not trigger
 external installation.
 
+The web-agent-intelligence recipe is intentionally harness-neutral at its safe
+boundary. Agent-browser is launched only from the owned direct local binary, not
+`npx`; harness attachment is deferred until browser artifacts can be pinned. All
+five adapters retain their native ownership/collision/verification/removal
+guarantees for Loom MCP and skills. OpenSrc is an owned instruction-only skill
+and must be invoked with `--modify=false`.
+
 ## Caveats
 
 - OpenCode releases frequently; the installed `1.18.18` trails official tag

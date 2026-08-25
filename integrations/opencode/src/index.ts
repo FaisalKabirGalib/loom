@@ -20,6 +20,7 @@ import type {
   Diagnostic,
   HarnessAdapter,
   HarnessState,
+  LoomResources,
 } from "@loom/core";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
@@ -27,10 +28,15 @@ const PLUGIN_PATH = ".opencode/plugins/loom.ts";
 const OWNERSHIP_PATH = ".loom/ownership.json";
 const CONFIG_NAMES = ["opencode.jsonc", "opencode.json"] as const;
 const DEFAULT_COMMAND = ["loom", "mcp"];
-const MCP_VALUE = (command: readonly string[]) => ({
+const AGENT_BROWSER_POINTER = "mcp.agent-browser";
+const MCP_VALUE = (
+  command: readonly string[],
+  env?: Readonly<Record<string, string>>,
+) => ({
   type: "local",
   command: [...command],
   enabled: true,
+  ...(env === undefined ? {} : { environment: { ...env } }),
 });
 
 const PLUGIN_SOURCE = `import type { Plugin } from "@opencode-ai/plugin";
@@ -284,10 +290,10 @@ function formatting(text: string): {
   };
 }
 
-function setMcp(text: string, value: unknown): string {
+function setMcp(text: string, name: string, value: unknown): string {
   return applyEdits(
     text,
-    modify(text, ["mcp", "loom"], value, {
+    modify(text, ["mcp", name], value, {
       formattingOptions: formatting(text),
     }),
   );
@@ -373,7 +379,7 @@ async function readOwnership(root: string): Promise<{
       if (
         pointers.some(
           ([key, pointer]) =>
-            key !== "mcp.loom" ||
+            (key !== "mcp.loom" && key !== AGENT_BROWSER_POINTER) ||
             !isRecord(pointer) ||
             !isConfigPath(pointer.path) ||
             !("value" in pointer),
@@ -424,9 +430,9 @@ async function collectSkills(source: string): Promise<Record<string, string>> {
   return result;
 }
 
-function pointerValue(config: Record<string, unknown>): unknown {
+function pointerValue(config: Record<string, unknown>, name = "loom"): unknown {
   const mcp = config.mcp;
-  return isRecord(mcp) ? mcp.loom : undefined;
+  return isRecord(mcp) ? mcp[name] : undefined;
 }
 
 function allowedMutationRelative(
@@ -500,6 +506,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
   async planInstall(
     root: string,
     plan: CapabilityPlan,
+    resources?: LoomResources,
   ): Promise<ConfigMutationPlan> {
     void plan;
     const projectRoot = resolve(root);
@@ -510,6 +517,7 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     const previous = ownershipState.ownership.harnesses[this.id];
     const ownedFiles = previous?.files ?? {};
     const ownedPointer = previous?.pointers["mcp.loom"];
+    const ownedAgentBrowser = previous?.pointers[AGENT_BROWSER_POINTER];
     const presentConfigs: string[] = [];
     for (const name of CONFIG_NAMES) {
       const content = await readProjectOptional(projectRoot, name, diagnostics);
@@ -584,6 +592,12 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
       desiredFiles = {
         ...desiredFiles,
         ...(await collectSkills(this.#skillsSource)),
+        ...(resources?.skill === undefined
+          ? {}
+          : {
+              [`.agents/skills/${resources.skill.name}/SKILL.md`]:
+                resources.skill.content,
+            }),
       };
     } catch {
       diagnostics.push(
@@ -681,7 +695,44 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     }
 
     if (parsed.value !== undefined) {
-      const updatedConfig = setMcp(configText, desiredMcp);
+      const desiredAgentBrowser =
+        resources?.mcp === undefined
+          ? undefined
+          : MCP_VALUE(
+              [resources.mcp.command, ...resources.mcp.args],
+              resources.mcp.env,
+            );
+      const currentAgentBrowser = pointerValue(parsed.value, "agent-browser");
+      if (
+        ownedAgentBrowser !== undefined &&
+        (ownedAgentBrowser.path !== configPath ||
+          !sameValue(currentAgentBrowser, ownedAgentBrowser.value))
+      )
+        diagnostics.push(
+          error(
+            "opencode.modified-owned-pointer",
+            "Owned mcp.agent-browser config was modified; refusing to overwrite it",
+            configPath,
+          ),
+        );
+      else if (
+        desiredAgentBrowser !== undefined &&
+        ownedAgentBrowser === undefined &&
+        currentAgentBrowser !== undefined
+      )
+        diagnostics.push(
+          error(
+            "opencode.mcp-collision",
+            "mcp.agent-browser already exists and is not owned by Loom",
+            configPath,
+          ),
+        );
+      const updatedConfig = setMcp(
+        setMcp(configText, "loom", desiredMcp),
+        "agent-browser",
+        desiredAgentBrowser ??
+          (ownedAgentBrowser === undefined ? currentAgentBrowser : undefined),
+      );
       if (updatedConfig !== configText) {
         mutations.push(
           mutation(
@@ -712,7 +763,20 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
           sha256(content),
         ]),
       ),
-      pointers: { "mcp.loom": { path: configPath, value: desiredMcp } },
+      pointers: {
+        "mcp.loom": { path: configPath, value: desiredMcp },
+        ...(resources?.mcp === undefined
+          ? {}
+          : {
+              [AGENT_BROWSER_POINTER]: {
+                path: configPath,
+                value: MCP_VALUE(
+                  [resources.mcp.command, ...resources.mcp.args],
+                  resources.mcp.env,
+                ),
+              },
+            }),
+      },
     };
     const ownershipContent = `${JSON.stringify(nextOwnership, null, 2)}\n`;
     if (ownershipState.content !== ownershipContent) {
@@ -989,45 +1053,48 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
         );
       }
     }
-    const pointer = owned.pointers["mcp.loom"];
-    if (pointer === undefined) {
+    if (owned.pointers["mcp.loom"] === undefined) {
       diagnostics.push(
         error(
           "opencode.missing-pointer",
           "Ownership record is missing mcp.loom",
         ),
       );
-    } else {
-      const content = await readProjectOptional(
-        projectRoot,
-        pointer.path,
-        diagnostics,
-      );
-      if (content === undefined) {
-        diagnostics.push(
-          error(
-            "opencode.missing-config",
-            "Owned OpenCode config is missing",
-            pointer.path,
-          ),
+    } else
+      for (const [key, pointer] of Object.entries(owned.pointers)) {
+        const content = await readProjectOptional(
+          projectRoot,
+          pointer.path,
+          diagnostics,
         );
-      } else {
-        const parsed = parseJsonc(content, pointer.path);
-        diagnostics.push(...parsed.diagnostics);
-        if (
-          parsed.value !== undefined &&
-          !sameValue(pointerValue(parsed.value), pointer.value)
-        ) {
+        if (content === undefined) {
           diagnostics.push(
             error(
-              "opencode.modified-owned-pointer",
-              "Owned mcp.loom config was modified",
+              "opencode.missing-config",
+              "Owned OpenCode config is missing",
               pointer.path,
             ),
           );
+        } else {
+          const parsed = parseJsonc(content, pointer.path);
+          diagnostics.push(...parsed.diagnostics);
+          if (
+            parsed.value !== undefined &&
+            !sameValue(
+              pointerValue(parsed.value, key.split(".")[1]!),
+              pointer.value,
+            )
+          ) {
+            diagnostics.push(
+              error(
+                "opencode.modified-owned-pointer",
+                "Owned mcp.loom config was modified",
+                pointer.path,
+              ),
+            );
+          }
         }
       }
-    }
     return diagnostics;
   }
 
@@ -1112,8 +1179,8 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
     }
 
     const remainingPointers: Record<string, OwnedPointer> = {};
-    const pointer = owned.pointers["mcp.loom"];
-    if (pointer !== undefined) {
+    if (Object.keys(owned.pointers).length > 0) {
+      const pointer = owned.pointers["mcp.loom"]!;
       const absolute = resolve(projectRoot, pointer.path);
       const content = await readProjectOptional(
         projectRoot,
@@ -1139,7 +1206,10 @@ export class OpenCodeHarnessAdapter implements HarnessAdapter {
           skipped.push(absolute);
           remainingPointers["mcp.loom"] = pointer;
         } else {
-          const updated = setMcp(content, undefined);
+          const updated = Object.keys(owned.pointers).reduce(
+            (text, key) => setMcp(text, key.split(".")[1]!, undefined),
+            content,
+          );
           if (updated !== content) {
             changed.push(absolute);
             if (!dryRun) {

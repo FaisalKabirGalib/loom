@@ -187,6 +187,31 @@ const flutterPackageIntelligenceRecipeSchema = z
       });
   });
 
+const webAgentIntelligenceRecipeSchema = z
+  .object({
+    kind: z.literal("web-agent-intelligence"),
+    toolPath: z.literal(".loom/tools/web-agent-intelligence"),
+    agentBrowser: z
+      .object({
+        package: z.literal("agent-browser"),
+        version: z.literal("0.34.0"),
+        integrity: z.literal(
+          "sha512-eR6Ey4I/DMs9zZ60b3ziV6pgLIgpxXWzggr3dfFbtskLmeXPJAgXCIIwVL4PihVYJqEUpvWgUKlZ2CIjY1u44g==",
+        ),
+      })
+      .strict(),
+    opensrc: z
+      .object({
+        package: z.literal("opensrc"),
+        version: z.literal("0.7.3"),
+        integrity: z.literal(
+          "sha512-REvdS9CG2q1KW6fiyLQkZgrhvNykARJCbigDF7vJOskGwqamwF74OzHRbgblZ7YlRkaLc7CTOsUMfnxw+NW83A==",
+        ),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const installRecipeSchema = z.discriminatedUnion("kind", [
   npmRecipeSchema,
   gitSkillRecipeSchema,
@@ -194,6 +219,7 @@ export const installRecipeSchema = z.discriminatedUnion("kind", [
   ociRecipeSchema,
   remoteMcpRecipeSchema,
   flutterPackageIntelligenceRecipeSchema,
+  webAgentIntelligenceRecipeSchema,
 ]);
 
 const setupCandidateShapeSchema = z

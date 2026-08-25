@@ -21,6 +21,15 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
 import { FLUTTER_TOOL_LOCK } from "./flutter-tool-lock.js";
 import { FLUTTER_TOOL_PUBSPEC } from "./flutter-tool-pubspec.js";
+export * from "./web-agent-intelligence.js";
+export {
+  acquireInstallerTransactionLock,
+  type InstallerTransactionLock,
+} from "./transaction-lock.js";
+import {
+  acquireInstallerTransactionLock,
+  type InstallerTransactionLock,
+} from "./transaction-lock.js";
 
 const LEGACY_SKILLS = [
   "dart-add-unit-test",
@@ -217,7 +226,7 @@ interface InstallerRollbackState {
     previousMode?: number;
     bytes: Buffer;
   };
-  lock: TransactionLock;
+  lock: InstallerTransactionLock;
 }
 
 const OWNERSHIP_PATH = ".loom/setup-ownership.json";
@@ -225,82 +234,6 @@ const TRANSACTION_LOCK_PATH = ".loom/.installer-transaction.lock";
 const CONFIG_PATHS = ["opencode.jsonc", "opencode.json"] as const;
 const RUNTIME_PATH = `${FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath}/.runtime/dart-pubdev-explorer${process.platform === "win32" ? ".exe" : ""}`;
 const RUNTIME_STAGED_PATH = `${FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath}/.runtime/.dart-pubdev-explorer.staged`;
-
-interface TransactionLock {
-  release(): Promise<void>;
-}
-
-const activeTransactionLocks = new Set<string>();
-
-async function acquireTransactionLock(root: string): Promise<TransactionLock> {
-  const projectRoot = resolve(root);
-  if (activeTransactionLocks.has(projectRoot))
-    throw new Error("Installer transaction is already active");
-  const lockPath = resolve(projectRoot, TRANSACTION_LOCK_PATH);
-  const loomPath = dirname(lockPath);
-  const loomExisted = await lstat(loomPath)
-    .then(() => true)
-    .catch((cause: NodeJS.ErrnoException) => {
-      if (cause.code === "ENOENT") return false;
-      throw cause;
-    });
-  await mkdir(loomPath, { recursive: true, mode: 0o700 });
-  await assertSafeDirectory(projectRoot, loomPath);
-  const owner = `${JSON.stringify({ pid: process.pid, nonce: randomUUID() })}\n`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      await mkdir(lockPath, { mode: 0o700 });
-      try {
-        await writeFile(join(lockPath, "owner.json"), owner, {
-          mode: 0o600,
-          flag: "wx",
-        });
-      } catch (cause) {
-        await rm(lockPath, { recursive: true, force: true });
-        throw cause;
-      }
-      activeTransactionLocks.add(projectRoot);
-      return {
-        async release(): Promise<void> {
-          try {
-            const current = await readFile(
-              join(lockPath, "owner.json"),
-              "utf8",
-            );
-            if (current !== owner)
-              throw new Error("Installer transaction lock changed");
-            await rm(lockPath, { recursive: true, force: true });
-            if (!loomExisted) await rmdir(loomPath).catch(() => undefined);
-          } finally {
-            activeTransactionLocks.delete(projectRoot);
-          }
-        },
-      };
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
-      const state = await lstat(lockPath).catch(() => undefined);
-      if (state === undefined || !state.isDirectory() || state.isSymbolicLink())
-        throw new Error("Installer transaction lock is unsafe");
-      const stale = await readFile(join(lockPath, "owner.json"), "utf8")
-        .then((content) => {
-          const value = JSON.parse(content) as { pid?: unknown };
-          if (!Number.isInteger(value.pid) || (value.pid as number) <= 0)
-            return false;
-          try {
-            process.kill(value.pid as number, 0);
-            return false;
-          } catch (error) {
-            return (error as NodeJS.ErrnoException).code === "ESRCH";
-          }
-        })
-        .catch(() => false);
-      if (!stale || attempt === 1)
-        throw new Error("Installer transaction is already active");
-      await rm(lockPath, { recursive: true, force: true });
-    }
-  }
-  throw new Error("Installer transaction is already active");
-}
 
 const defaultRunner: ProcessRunner = (request) =>
   new Promise((done, reject) => {
@@ -2078,9 +2011,9 @@ export class CapabilityInstaller {
           ),
         ],
       };
-    let lock: TransactionLock;
+    let lock: InstallerTransactionLock;
     try {
-      lock = await acquireTransactionLock(plan.root);
+      lock = await acquireInstallerTransactionLock(plan.root);
     } catch (cause) {
       return {
         changed: [],
@@ -2484,9 +2417,9 @@ export class CapabilityInstaller {
 
   async uninstall(root: string, dryRun = false): Promise<InstallerResult> {
     const projectRoot = resolve(root);
-    let lock: TransactionLock;
+    let lock: InstallerTransactionLock;
     try {
-      lock = await acquireTransactionLock(projectRoot);
+      lock = await acquireInstallerTransactionLock(projectRoot);
     } catch (cause) {
       return {
         changed: [],

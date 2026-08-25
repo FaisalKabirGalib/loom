@@ -16,6 +16,7 @@ import {
 import { delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
+import { spawn } from "node:child_process";
 
 import { AntigravityHarnessAdapter } from "@loom/antigravity";
 import { ClaudeHarnessAdapter } from "@loom/claude";
@@ -54,6 +55,9 @@ import {
 import {
   CapabilityInstaller,
   FLUTTER_PACKAGE_INTELLIGENCE_RECIPE,
+  WEB_AGENT_INTELLIGENCE_RECIPE,
+  WebAgentIntelligenceInstaller,
+  webAgentIntelligenceResources,
   type FlutterPackageIntelligenceInstallRecipe,
   type InstallerRollbackToken,
 } from "@loom/installers";
@@ -119,6 +123,7 @@ export interface RunCliOptions {
   confirm?: (prompt: string) => Promise<boolean>;
   select?: (prompt: string, choices: readonly string[]) => Promise<string>;
   installerFactory?: (dartPath: string, gitPath: string) => SetupInstaller;
+  webInstallerFactory?: () => WebAgentIntelligenceInstaller;
   resolveExecutable?: (
     name: string,
     environment: NodeJS.ProcessEnv,
@@ -312,6 +317,7 @@ interface CommandContext {
   confirm: (prompt: string) => Promise<boolean>;
   select: (prompt: string, choices: readonly string[]) => Promise<string>;
   installerFactory: (dartPath: string, gitPath: string) => SetupInstaller;
+  webInstallerFactory: () => WebAgentIntelligenceInstaller;
   resolveExecutable: (
     name: string,
     environment: NodeJS.ProcessEnv,
@@ -790,6 +796,9 @@ async function discoverCommand(
   printLines(context.stdout, [
     `Discovery (${kind})`,
     ...unique.map((item) => `  ${item.id}  ${item.name}  ${item.trustTier}`),
+    ...unique.map(
+      (item) => `  manual review: loom discover ${kind} ${item.id}`,
+    ),
     ...(unique.length === 0 ? ["  no candidates"] : []),
     ...warnings.map((item) => `Warning: ${item}`),
   ]);
@@ -872,10 +881,57 @@ async function executablePath(
     const candidate = resolve(directory, name);
     try {
       await access(candidate, fsConstants.X_OK);
-      return candidate;
+      return realpath(candidate);
     } catch {}
   }
   return undefined;
+}
+
+async function nodeVersionMajor(path: string): Promise<number | undefined> {
+  return new Promise((resolveVersion) => {
+    const child = spawn(path, ["--version"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.once("error", () => resolveVersion(undefined));
+    child.once("close", (code) => {
+      const match = /^v?(\d+)\./u.exec(output.trim());
+      resolveVersion(
+        code === 0 && match?.[1] !== undefined ? Number(match[1]) : undefined,
+      );
+    });
+  });
+}
+
+function webInstaller(): WebAgentIntelligenceInstaller {
+  return new WebAgentIntelligenceInstaller(
+    (request) =>
+      new Promise((resolveResult) => {
+        const child = spawn(request.command, [...request.args], {
+          cwd: request.cwd,
+          env: request.env,
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        child.stderr.on("data", (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+        child.once("error", (error) =>
+          resolveResult({ exitCode: 1, stdout, stderr: error.message }),
+        );
+        child.once("close", (exitCode) =>
+          resolveResult({ exitCode: exitCode ?? 1, stdout, stderr }),
+        );
+      }),
+  );
 }
 
 async function readSetupApproval(
@@ -996,11 +1052,6 @@ async function setupCommand(
   const intent = decodeSetupIntent(encoded);
   if (intent.mode !== "apply")
     throw new CliError("setup.invalid-mode", "Setup intent is not applicable");
-  if (intent.harness !== "opencode")
-    throw new CliError(
-      "setup.unsupported-harness",
-      "The first audited setup recipe supports OpenCode only",
-    );
   await assertSafeSetupState(context.root);
   const actualRoot = await realpath(context.root);
   if (intent.root !== actualRoot)
@@ -1013,7 +1064,7 @@ async function setupCommand(
   if (!harnessState.installed)
     throw new CliError(
       "setup.not-connected",
-      "Run loom connect --harness opencode and restart OpenCode before setup",
+      `Run loom connect --harness ${intent.harness} before setup`,
     );
   const policy = await loadEffectivePolicy(context.root, context.env);
   const resolution = await planProject(context.root, {
@@ -1037,18 +1088,21 @@ async function setupCommand(
       "setup.intent-stale",
       "The generated setup intent no longer matches the resolved capabilities",
     );
-  const unsupported = selected.filter(
-    (id) =>
-      id !== FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate &&
-      id !== "builtin:dart-flutter-mcp",
+  const flutter = resolution.project.frameworks.some(
+    (name) => name === "flutter" || name === "dart",
   );
-  if (unsupported.length > 0)
-    throw new CliError(
-      "setup.recipe-unavailable",
-      `No audited install recipe is available for: ${unsupported.join(", ")}`,
+  const web =
+    resolution.project.languages.includes("typescript") ||
+    resolution.project.frameworks.some((name) =>
+      ["react", "next.js", "vite", "astro"].includes(name),
     );
+  const auditedCandidate = flutter
+    ? FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate
+    : web
+      ? WEB_AGENT_INTELLIGENCE_RECIPE.candidate
+      : undefined;
   const skillSearch =
-    intent.selectedSkills.length === 0
+    !flutter || intent.selectedSkills.length === 0
       ? { candidates: [] }
       : await discoverFlutterSkills(
           context.root,
@@ -1111,30 +1165,41 @@ async function setupCommand(
       `Selected skill is not exactly pinned: ${selection.id}`,
     );
   });
-  const recipe: FlutterPackageIntelligenceInstallRecipe = {
-    kind: "flutter-package-intelligence",
-    toolPath: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath,
-    dartPubdevMcp: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.dartPubdevMcp,
-    skillsCli: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.skillsCli,
-    pubspecHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.pubspecHash,
-    lockfileHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.lockfileHash,
-    selectedSkills,
-    ...(intent.selectionRationale === undefined
-      ? {}
-      : { selectionRationale: intent.selectionRationale }),
-  };
-  const candidates = resolution.project.frameworks.some(
-    (name) => name === "flutter" || name === "dart",
-  )
-    ? [
-        {
-          id: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.candidate,
-          capabilities: resolvedCapabilities,
-          recipe,
-          recipeDigest: computeRecipeDigest(recipe),
-        },
-      ]
-    : [];
+  const recipe = flutter
+    ? {
+        kind: "flutter-package-intelligence" as const,
+        toolPath: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.toolPath,
+        dartPubdevMcp: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.dartPubdevMcp,
+        skillsCli: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.skillsCli,
+        pubspecHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.pubspecHash,
+        lockfileHash: FLUTTER_PACKAGE_INTELLIGENCE_RECIPE.lockfileHash,
+        selectedSkills,
+        ...(intent.selectionRationale === undefined
+          ? {}
+          : { selectionRationale: intent.selectionRationale }),
+      }
+    : web
+      ? {
+          kind: "web-agent-intelligence" as const,
+          toolPath: WEB_AGENT_INTELLIGENCE_RECIPE.toolPath,
+          agentBrowser: WEB_AGENT_INTELLIGENCE_RECIPE.agentBrowser,
+          opensrc: WEB_AGENT_INTELLIGENCE_RECIPE.opensrc,
+        }
+      : undefined;
+  const candidates =
+    recipe === undefined || auditedCandidate === undefined
+      ? []
+      : [
+          {
+            id: auditedCandidate,
+            capabilities:
+              resolvedCapabilities.length > 0
+                ? resolvedCapabilities
+                : ["UI.browser-test"],
+            recipe,
+            recipeDigest: computeRecipeDigest(recipe),
+          },
+        ];
   const {
     detectionSignals: _detectionSignals,
     existingAgentConfigs: _existingAgentConfigs,
@@ -1149,36 +1214,62 @@ async function setupCommand(
   const now = context.now();
   const safeTask =
     intent.task === undefined ? undefined : String(safe(intent.task));
-  const dart =
-    candidates.length === 0
-      ? undefined
-      : await context.resolveExecutable("dart", context.env);
-  if (candidates.length > 0 && dart === undefined)
+  const dart = !flutter
+    ? undefined
+    : await context.resolveExecutable("dart", context.env);
+  if (flutter && dart === undefined)
     throw new CliError(
       "setup.dart-unavailable",
       "The audited Flutter recipe requires an executable dart SDK on PATH",
     );
   const dartDigest =
     dart === undefined ? undefined : sha256(await readFile(dart));
-  const git =
-    candidates.length === 0
-      ? undefined
-      : await context.resolveExecutable("git", context.env);
-  if (candidates.length > 0 && git === undefined)
+  const git = !flutter
+    ? undefined
+    : await context.resolveExecutable("git", context.env);
+  if (flutter && git === undefined)
     throw new CliError(
       "setup.git-unavailable",
       "The audited Flutter recipe requires an executable git on PATH",
     );
   const gitDigest = git === undefined ? undefined : sha256(await readFile(git));
+  const node = !web
+    ? undefined
+    : await context.resolveExecutable("node", context.env);
+  const npm = !web
+    ? undefined
+    : await context.resolveExecutable("npm", context.env);
+  if (web && (node === undefined || npm === undefined))
+    throw new CliError(
+      "setup.node-unavailable",
+      "The audited web recipe requires Node.js >=24 and npm on PATH",
+    );
+  const nodeDigest =
+    node === undefined ? undefined : sha256(await readFile(node));
+  const npmDigest = npm === undefined ? undefined : sha256(await readFile(npm));
+  const nodeVersion =
+    node === undefined ? undefined : await nodeVersionMajor(node);
+  if (web && (nodeVersion === undefined || nodeVersion < 24))
+    throw new CliError(
+      "setup.node-version",
+      "The audited web recipe requires Node.js >=24",
+    );
   const activationBinding =
-    dart === undefined || git === undefined
+    flutter && (dart === undefined || git === undefined)
       ? { loomVersion: VERSION }
       : {
           loomVersion: VERSION,
           installerVersion: VERSION,
-          dart: { path: dart, digest: dartDigest },
-          git: { path: git, digest: gitDigest },
-          command: [dart, "mcp-server"],
+          ...(flutter
+            ? {
+                dart: { path: dart, digest: dartDigest },
+                git: { path: git, digest: gitDigest },
+                command: [dart, "mcp-server"],
+              }
+            : {
+                node: { path: node, version: nodeVersion, digest: nodeDigest },
+                npm: { path: npm, digest: npmDigest },
+              }),
           packageTool: recipe,
         };
   let setupPlan = createSetupPlan({
@@ -1212,19 +1303,39 @@ async function setupCommand(
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
   });
-  const installer =
-    dart === undefined || git === undefined
+  const installer: any =
+    flutter && dart !== undefined && git !== undefined
+      ? context.installerFactory(dart, git)
+      : web
+        ? context.webInstallerFactory()
+        : undefined;
+  const webResources =
+    web && context.env.AGENT_BROWSER_EXECUTABLE_PATH !== undefined
+      ? webAgentIntelligenceResources(
+          context.root,
+          resolve(context.env.AGENT_BROWSER_EXECUTABLE_PATH),
+        )
+      : undefined;
+  const harnessPlan = await adapter.planInstall(
+    context.root,
+    resolution.plan,
+    webResources,
+  );
+  const installerPlan: any =
+    installer === undefined || recipe === undefined
       ? undefined
-      : context.installerFactory(dart, git);
-  const harnessPlan = await adapter.planInstall(context.root, resolution.plan);
-  const installerPlan =
-    installer === undefined
-      ? undefined
-      : await installer.plan(context.root, recipe);
+      : flutter
+        ? await installer.plan(context.root, recipe)
+        : await installer.plan(
+            context.root,
+            node,
+            npm,
+            context.env.AGENT_BROWSER_EXECUTABLE_PATH,
+          );
   if (installerPlan && hasErrors(installerPlan.diagnostics))
     throw new CliError(
       "setup.install-plan-invalid",
-      installerPlan.diagnostics.map((item) => item.message).join("; "),
+      installerPlan.diagnostics.map((item: any) => item.message).join("; "),
     );
   const {
     planId: _basePlanId,
@@ -1240,19 +1351,30 @@ async function setupCommand(
           installerPlan === undefined
             ? null
             : {
-                recipeDigest: installerPlan.recipeDigest,
-                executionRequired: installerPlan.executionRequired,
-                mutations: installerPlan.mutations.map((item) => ({
-                  kind: item.kind,
-                  path: item.path,
-                  ...(item.content === undefined
-                    ? {}
-                    : { contentHash: sha256(item.content) }),
-                  ...(item.expectedHash === undefined
-                    ? {}
-                    : { expectedHash: item.expectedHash }),
-                })),
-                process: installerPlan.process,
+                recipeDigest: flutter
+                  ? installerPlan.recipeDigest
+                  : computeRecipeDigest(recipe!),
+                executionRequired: flutter
+                  ? installerPlan.executionRequired
+                  : true,
+                mutations: (flutter ? installerPlan.mutations : []).map(
+                  (item: any) => ({
+                    kind: item.kind,
+                    path: item.path,
+                    ...(item.content === undefined
+                      ? {}
+                      : { contentHash: sha256(item.content) }),
+                    ...(item.expectedHash === undefined
+                      ? {}
+                      : { expectedHash: item.expectedHash }),
+                  }),
+                ),
+                process: flutter
+                  ? installerPlan.process
+                  : installerPlan.install,
+                ...(flutter || installerPlan.bindings === undefined
+                  ? {}
+                  : { bindings: installerPlan.bindings }),
                 ...(installerPlan.compileProcess === undefined
                   ? {}
                   : { compileProcess: installerPlan.compileProcess }),
@@ -1278,8 +1400,8 @@ async function setupCommand(
   const approvalReusable =
     previousApproval !== undefined &&
     (previousApproval.planId === setupPlan.planId ||
-      ((installerPlan?.mutations.length ?? 0) === 0 &&
-        installerPlan?.executionRequired !== true &&
+      ((flutter ? (installerPlan?.mutations.length ?? 0) === 0 : !web) &&
+        (flutter ? installerPlan?.executionRequired !== true : !web) &&
         harnessPlan.mutations.length === 0)) &&
     canonicalJson([...previousApproval.approvedRecipeDigests].sort()) ===
       canonicalJson(recipeDigests) &&
@@ -1290,10 +1412,10 @@ async function setupCommand(
     `  plan             ${setupPlan.planId}`,
     `  harness          ${adapter.id}`,
     `  capabilities     ${selected.join(", ") || "none"}`,
-    "  source           dart_pubdev_mcp@0.9.0 + skills@1.0.0",
-    `  activation       ${dart ?? "none"} mcp-server + dart-pubdev-explorer`,
+    `  source           ${flutter ? "dart_pubdev_mcp@0.9.0 + skills@1.0.0" : web ? "agent-browser@0.34.0 + opensrc@0.7.3" : "none"}`,
+    `  activation       ${flutter ? `${dart ?? "none"} mcp-server + dart-pubdev-explorer` : web ? `${node ?? "none"} + ${npm ?? "none"}` : "none"}`,
     `  skill paths      ${selectedSkills.length} explicitly selected under .agents/skills`,
-    `  installer files  ${installerPlan?.mutations.length ?? 0}`,
+    `  installer files  ${flutter ? (installerPlan?.mutations.length ?? 0) : web ? 1 : 0}`,
     `  harness changes  ${harnessPlan.mutations.length}`,
     `  approval         ${approvalReusable ? "reused" : "required once"}`,
   ]);
@@ -1314,32 +1436,36 @@ async function setupCommand(
   }
   if (
     (dart !== undefined && sha256(await readFile(dart)) !== dartDigest) ||
-    (git !== undefined && sha256(await readFile(git)) !== gitDigest)
+    (git !== undefined && sha256(await readFile(git)) !== gitDigest) ||
+    (node !== undefined && sha256(await readFile(node)) !== nodeDigest) ||
+    (npm !== undefined && sha256(await readFile(npm)) !== npmDigest)
   )
     throw new CliError(
       "setup.executable-drift",
-      "Dart or Git changed after setup review; generate a new setup command",
+      "An approved executable changed after setup review; generate a new setup command",
     );
   if (
     approvalReusable &&
-    (installerPlan?.mutations.length ?? 0) === 0 &&
-    installerPlan?.executionRequired !== true &&
+    (flutter ? (installerPlan?.mutations.length ?? 0) === 0 : !web) &&
+    (flutter ? installerPlan?.executionRequired !== true : !web) &&
     harnessPlan.mutations.length === 0
   ) {
     printLines(context.stdout, ["Setup complete", "  no changes"]);
     return 0;
   }
   const transaction = createSetupTransaction(setupPlan, now);
-  let installerRollback: InstallerRollbackToken | undefined;
+  let installerRollback: any;
   let harnessChanged = false;
   let harnessRollback: HarnessPreimage[] = [];
   let metadataRollback: MetadataPreimage[] = [];
   try {
     if (installer && installerPlan) {
-      const result = await installer.apply(installerPlan);
+      const result = flutter
+        ? await installer.apply(installerPlan)
+        : await installer.applyTransaction(installerPlan);
       if (hasErrors(result.diagnostics))
         throw new Error(
-          result.diagnostics.map((item) => item.message).join("; "),
+          result.diagnostics.map((item: any) => item.message).join("; "),
         );
       installerRollback = result.rollbackToken;
     }
@@ -1424,7 +1550,7 @@ async function setupCommand(
       const commitDiagnostics = await installer.commit(installerRollback);
       if (hasErrors(commitDiagnostics))
         throw new Error(
-          commitDiagnostics.map(({ message }) => message).join("; "),
+          commitDiagnostics.map(({ message }: any) => message).join("; "),
         );
       installerRollback = undefined;
     }
@@ -1441,8 +1567,8 @@ async function setupCommand(
         const result = await installer.rollback(installerRollback);
         rollbackErrors.push(
           ...result.diagnostics
-            .filter(({ level }) => level === "error")
-            .map(({ message }) => message),
+            .filter(({ level }: any) => level === "error")
+            .map(({ message }: any) => message),
         );
       } catch (rollbackCause) {
         rollbackErrors.push(message(rollbackCause));
@@ -1753,6 +1879,14 @@ async function removeCommand(
           )
           .uninstall(context.root, dryRun)
       : { changed: [], skipped: [], diagnostics: [] };
+  const webConsumers = [
+    ...new Set([
+      ...Object.keys(
+        await readWorkflowHarnesses(join(context.root, STATE_DIRECTORY)),
+      ),
+      ...(await readOwnedHarnessIds(context.root)),
+    ]),
+  ].filter((harness) => harness !== adapter.id);
   if (hasErrors(installerResult.diagnostics)) {
     printLines(context.stdout, [
       `Remove (${adapter.id})`,
@@ -1765,7 +1899,35 @@ async function removeCommand(
     return EXIT_ERROR;
   }
   const result = await adapter.uninstallOwned(context.root, dryRun);
-  if (!dryRun && !hasErrors(result.diagnostics)) {
+  if (hasErrors(result.diagnostics)) {
+    printLines(context.stdout, [
+      `Remove (${adapter.id})`,
+      `  changed ${result.changed.length + installerResult.changed.length}`,
+      `  skipped ${result.skipped.length + installerResult.skipped.length}`,
+      ...installerResult.diagnostics.map(
+        (item) => `  ${item.level} ${item.code}: ${item.message}`,
+      ),
+      ...result.diagnostics.map(
+        (item) => `  ${item.level} ${item.code}: ${item.message}`,
+      ),
+    ]);
+    return EXIT_ERROR;
+  }
+  const webResult =
+    webConsumers.length === 0
+      ? await access(
+          join(
+            context.root,
+            WEB_AGENT_INTELLIGENCE_RECIPE.toolPath,
+            "loom-web-tools.lock.json",
+          ),
+        )
+          .then(() =>
+            context.webInstallerFactory().uninstall(context.root, dryRun),
+          )
+          .catch(() => [])
+      : [];
+  if (!dryRun && !hasErrors([...result.diagnostics, ...webResult])) {
     await removeSetupApproval(context.root, context.env);
     if (await hasOwnedHarnesses(context.root)) {
       await removeWorkflowHarness(context.root, adapter.id);
@@ -1792,11 +1954,12 @@ async function removeCommand(
     ...installerResult.diagnostics.map(
       (item) => `  ${item.level} ${item.code}: ${item.message}`,
     ),
+    ...webResult.map((item) => `  ${item.level} ${item.code}: ${item.message}`),
     ...result.diagnostics.map(
       (item) => `  ${item.level} ${item.code}: ${item.message}`,
     ),
   ]);
-  return hasErrors(result.diagnostics) ? EXIT_ERROR : 0;
+  return hasErrors([...result.diagnostics, ...webResult]) ? EXIT_ERROR : 0;
 }
 
 async function readLockHarnesses(
@@ -1883,6 +2046,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function hasOwnedHarnesses(root: string): Promise<boolean> {
+  return (await readOwnedHarnessIds(root)).length > 0;
+}
+
+async function readOwnedHarnessIds(root: string): Promise<string[]> {
   try {
     const value = ownershipStateSchema.parse(
       JSON.parse(
@@ -1892,9 +2059,9 @@ async function hasOwnedHarnesses(root: string): Promise<boolean> {
         ),
       ) as unknown,
     );
-    return Object.keys(value.harnesses).length > 0;
+    return Object.keys(value.harnesses);
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -1929,6 +2096,20 @@ async function doctorCommand(
             process.execPath,
         )
         .verify(context.root)),
+    );
+  if (
+    await access(
+      join(
+        context.root,
+        WEB_AGENT_INTELLIGENCE_RECIPE.toolPath,
+        "loom-web-tools.lock.json",
+      ),
+    )
+      .then(() => true)
+      .catch(() => false)
+  )
+    diagnostics.push(
+      ...(await context.webInstallerFactory().verify(context.root)),
     );
   const stateNames = [
     PROJECT_STATE_FILES.project,
@@ -2208,6 +2389,7 @@ export async function runCli(
     installerFactory:
       options.installerFactory ??
       ((dartPath, gitPath) => new CapabilityInstaller({ dartPath, gitPath })),
+    webInstallerFactory: options.webInstallerFactory ?? webInstaller,
     resolveExecutable: options.resolveExecutable ?? executablePath,
     ...(options.afterSetupMetadataWrite === undefined
       ? {}

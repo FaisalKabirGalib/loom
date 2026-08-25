@@ -43,8 +43,17 @@ project and exact recipe, shows one consolidated review, asks once, installs,
 activates, verifies, and records rollback state. An unchanged repeat is a
 verified no-op and reuses the authenticated approval.
 
-The first audited external recipe supports Flutter projects on OpenCode. It
-creates `.loom/tools/flutter-package-intelligence` with exact
+The audited external recipes support Flutter projects on OpenCode and an
+explicit web-agent-intelligence boundary for TypeScript, React, Next.js, Vite,
+and Astro projects. The web boundary requires installed Node.js and npm, writes
+only `.loom/tools/web-agent-intelligence`, pins `agent-browser@0.34.0` and
+`opensrc@0.7.3` by reviewed npm integrity, uses no `npx`, and keeps HOME, npm,
+XDG, browser, and opensrc state local. Its browser binary provisioning remains a
+manual reviewed command; Loom never fetches it automatically. OpenSrc is
+instruction-only and defaults to `--modify=false`. Unsupported discovered tools
+remain recommendations with manual commands and never block a setup plan.
+
+The Flutter recipe creates `.loom/tools/flutter-package-intelligence` with exact
 `dart_pubdev_mcp@0.9.0` and `skills@1.0.0` locks, isolated project-local Dart
 state, the official Dart MCP, and `dart-pubdev-explorer`. Selected package
 skills are copied locally with version and content-hash ownership; Loom never
@@ -115,6 +124,8 @@ An apply may create or update:
 - Claude Code: `mcpServers.loom` in `.mcp.json` and `.claude/skills/loom-*`
 - OMP: `mcpServers.loom` in `.omp/mcp.json` and `.omp/skills/loom-*`
 - Antigravity: `mcpServers.loom` in `.agents/mcp_config.json`
+- Web tooling: `.loom/tools/web-agent-intelligence/` only; no application
+  `package.json`, lockfile, `node_modules`, global npm cache, or home mutation
 
 The canonical eight instruction-only skills live in
 [`packages/skills`](packages/skills). OpenCode, Codex, and Antigravity target

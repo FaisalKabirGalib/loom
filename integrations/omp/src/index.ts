@@ -21,6 +21,7 @@ import type {
   Diagnostic,
   HarnessAdapter as HarnessAdapterContract,
   HarnessState,
+  LoomResources,
 } from "@loom/core";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
@@ -29,6 +30,7 @@ const OWNERSHIP_PATH = ".loom/ownership.json";
 const DEFAULT_COMMAND = "loom";
 const DEFAULT_ARGS = ["mcp"] as const;
 const HASH = /^[a-f0-9]{64}$/u;
+const AGENT_BROWSER_POINTER = "mcpServers.agent-browser";
 
 interface OwnedPointer {
   path: string;
@@ -259,7 +261,8 @@ async function readOwnership(root: string): Promise<{
       if (
         pointers.some(
           ([key, pointer]) =>
-            key !== "mcpServers.loom" || !validPointer(pointer),
+            (key !== "mcpServers.loom" && key !== AGENT_BROWSER_POINTER) ||
+            !validPointer(pointer),
         )
       )
         throw new Error();
@@ -369,17 +372,17 @@ function formatting(text: string): {
   };
 }
 
-function setPointer(text: string, value: unknown): string {
+function setPointer(text: string, name: string, value: unknown): string {
   return applyEdits(
     text,
-    modify(text, ["mcpServers", "loom"], value, {
+    modify(text, ["mcpServers", name], value, {
       formattingOptions: formatting(text),
     }),
   );
 }
 
-function pointerValue(config: Record<string, unknown>): unknown {
-  return isRecord(config.mcpServers) ? config.mcpServers.loom : undefined;
+function pointerValue(config: Record<string, unknown>, name: string): unknown {
+  return isRecord(config.mcpServers) ? config.mcpServers[name] : undefined;
 }
 
 function mutation(
@@ -447,6 +450,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
   async planInstall(
     root: string,
     plan: CapabilityPlan,
+    resources?: LoomResources,
   ): Promise<ConfigMutationPlan> {
     void plan;
     const projectRoot = resolve(root);
@@ -457,6 +461,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
     const previous = state.ownership.harnesses.omp;
     const ownedFiles = previous?.files ?? {};
     const ownedPointer = previous?.pointers["mcpServers.loom"];
+    const ownedAgentBrowser = previous?.pointers[AGENT_BROWSER_POINTER];
     const desiredPointer = {
       type: "stdio",
       command: this.#command,
@@ -484,7 +489,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
           ),
         );
       } else {
-        const current = pointerValue(parsed.value);
+        const current = pointerValue(parsed.value, "loom");
         if (
           ownedPointer !== undefined &&
           !sameValue(current, ownedPointer.value)
@@ -511,6 +516,11 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
     let desiredFiles: Record<string, string> = {};
     try {
       desiredFiles = await collectSkills(this.#skillsSource);
+      if (resources?.skill !== undefined) {
+        const path = `.omp/skills/${resources.skill.name}/SKILL.md`;
+        if (!isSkillPath(path)) throw new Error("Invalid Loom resource skill");
+        desiredFiles[path] = resources.skill.content;
+      }
     } catch {
       diagnostics.push(
         diagnostic(
@@ -597,7 +607,45 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
     }
 
     if (parsed.value !== undefined) {
-      const nextConfig = setPointer(configText, desiredPointer);
+      const desiredAgentBrowser =
+        resources?.mcp === undefined
+          ? undefined
+          : {
+              type: "stdio",
+              command: resources.mcp.command,
+              args: [...resources.mcp.args],
+              env: { ...resources.mcp.env },
+            };
+      const currentAgentBrowser = pointerValue(parsed.value, "agent-browser");
+      if (
+        ownedAgentBrowser !== undefined &&
+        !sameValue(currentAgentBrowser, ownedAgentBrowser.value)
+      )
+        diagnostics.push(
+          diagnostic(
+            "omp.modified-owned-pointer",
+            "Owned mcpServers.agent-browser config was modified; refusing to overwrite it",
+            CONFIG_PATH,
+          ),
+        );
+      else if (
+        desiredAgentBrowser !== undefined &&
+        ownedAgentBrowser === undefined &&
+        currentAgentBrowser !== undefined
+      )
+        diagnostics.push(
+          diagnostic(
+            "omp.mcp-collision",
+            "mcpServers.agent-browser already exists and is not owned by Loom",
+            CONFIG_PATH,
+          ),
+        );
+      const nextConfig = setPointer(
+        setPointer(configText, "loom", desiredPointer),
+        "agent-browser",
+        desiredAgentBrowser ??
+          (ownedAgentBrowser === undefined ? currentAgentBrowser : undefined),
+      );
       if (nextConfig !== configText)
         mutations.push(
           mutation(
@@ -628,6 +676,19 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
       ),
       pointers: {
         "mcpServers.loom": { path: CONFIG_PATH, value: desiredPointer },
+        ...(resources?.mcp === undefined
+          ? {}
+          : {
+              [AGENT_BROWSER_POINTER]: {
+                path: CONFIG_PATH,
+                value: {
+                  type: "stdio",
+                  command: resources.mcp.command,
+                  args: [...resources.mcp.args],
+                  env: { ...resources.mcp.env },
+                },
+              },
+            }),
       },
     };
     const ownershipContent = `${JSON.stringify(ownership, null, 2)}\n`;
@@ -855,13 +916,12 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
           ),
         );
     }
-    const pointer = owned.pointers["mcpServers.loom"];
     const config = await readProjectOptional(
       projectRoot,
       CONFIG_PATH,
       diagnostics,
     );
-    if (pointer === undefined) {
+    if (owned.pointers["mcpServers.loom"] === undefined) {
       diagnostics.push(
         diagnostic(
           "omp.missing-pointer",
@@ -879,17 +939,21 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
     } else {
       const parsed = parseConfig(config);
       diagnostics.push(...parsed.diagnostics);
-      if (
-        parsed.value !== undefined &&
-        !sameValue(pointerValue(parsed.value), pointer.value)
-      )
-        diagnostics.push(
-          diagnostic(
-            "omp.modified-owned-pointer",
-            "Owned mcpServers.loom config was modified",
-            CONFIG_PATH,
-          ),
-        );
+      for (const [key, pointer] of Object.entries(owned.pointers))
+        if (
+          parsed.value !== undefined &&
+          !sameValue(
+            pointerValue(parsed.value, key.split(".")[1]!),
+            pointer.value,
+          )
+        )
+          diagnostics.push(
+            diagnostic(
+              "omp.modified-owned-pointer",
+              `Owned ${key} config was modified`,
+              CONFIG_PATH,
+            ),
+          );
     }
     return diagnostics;
   }
@@ -907,7 +971,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
 
     const paths = [
       ...Object.keys(owned.files),
-      ...(owned.pointers["mcpServers.loom"] === undefined ? [] : [CONFIG_PATH]),
+      ...(Object.keys(owned.pointers).length === 0 ? [] : [CONFIG_PATH]),
       OWNERSHIP_PATH,
     ];
     for (const path of paths) {
@@ -975,8 +1039,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
     }
 
     const retainedPointers: Record<string, OwnedPointer> = {};
-    const pointer = owned.pointers["mcpServers.loom"];
-    if (pointer !== undefined) {
+    if (Object.keys(owned.pointers).length > 0) {
       const configAbsolute = resolve(projectRoot, CONFIG_PATH);
       const config = await readProjectOptional(
         projectRoot,
@@ -988,11 +1051,16 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
       } else {
         const parsed = parseConfig(config);
         diagnostics.push(...parsed.diagnostics);
-        if (
-          parsed.value === undefined ||
-          !sameValue(pointerValue(parsed.value), pointer.value)
-        ) {
-          retainedPointers["mcpServers.loom"] = pointer;
+        const modified = Object.entries(owned.pointers).filter(
+          ([key, pointer]) =>
+            parsed.value === undefined ||
+            !sameValue(
+              pointerValue(parsed.value, key.split(".")[1]!),
+              pointer.value,
+            ),
+        );
+        if (modified.length > 0) {
+          Object.assign(retainedPointers, Object.fromEntries(modified));
           skipped.push(configAbsolute);
           diagnostics.push(
             diagnostic(
@@ -1002,7 +1070,10 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
             ),
           );
         } else {
-          const next = setPointer(config, undefined);
+          const next = Object.keys(owned.pointers).reduce(
+            (text, key) => setPointer(text, key.split(".")[1]!, undefined),
+            config,
+          );
           if (next !== config) {
             changed.push(configAbsolute);
             if (!dryRun) {
@@ -1016,7 +1087,7 @@ export class OmpHarnessAdapter implements HarnessAdapterContract {
               } catch {
                 changed.pop();
                 skipped.push(configAbsolute);
-                retainedPointers["mcpServers.loom"] = pointer;
+                Object.assign(retainedPointers, owned.pointers);
                 diagnostics.push(
                   diagnostic(
                     "omp.concurrent-change",

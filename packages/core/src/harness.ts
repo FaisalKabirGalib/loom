@@ -42,10 +42,31 @@ export type HarnessState = z.infer<typeof harnessStateSchema>;
 export type ConfigMutationPlan = z.infer<typeof configMutationPlanSchema>;
 export type ApplyResult = z.infer<typeof applyResultSchema>;
 
+export interface LoomMcpResource {
+  name: "agent-browser";
+  command: string;
+  args: readonly string[];
+  env?: Readonly<Record<string, string>>;
+}
+
+export interface LoomSkillResource {
+  name: string;
+  content: string;
+}
+
+export interface LoomResources {
+  mcp?: LoomMcpResource;
+  skill?: LoomSkillResource;
+}
+
 export interface HarnessAdapter {
   id: string;
   inspect(root: string): Promise<HarnessState>;
-  planInstall(root: string, plan: CapabilityPlan): Promise<ConfigMutationPlan>;
+  planInstall(
+    root: string,
+    plan: CapabilityPlan,
+    resources?: LoomResources,
+  ): Promise<ConfigMutationPlan>;
   apply(mutations: ConfigMutationPlan, dryRun?: boolean): Promise<ApplyResult>;
   verify(root: string): Promise<Diagnostic[]>;
   uninstallOwned(root: string, dryRun?: boolean): Promise<ApplyResult>;

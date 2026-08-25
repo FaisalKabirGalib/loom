@@ -19,6 +19,7 @@ import {
   type Diagnostic,
   type HarnessAdapter,
   type HarnessState,
+  type LoomResources,
 } from "@loom/core";
 
 const BEGIN_MARKER = "# BEGIN LOOM MANAGED BLOCK: mcp_servers.loom";
@@ -27,6 +28,8 @@ const CONFIG_PATH = ".codex/config.toml";
 const OWNERSHIP_PATH = ".loom/ownership.json";
 const SERVER_TABLE =
   /^\s*\[\s*mcp_servers\s*\.\s*(?:loom|"loom"|'loom')\s*\]\s*(?:#.*)?$/m;
+const AGENT_BROWSER_SERVER_TABLE =
+  /^\s*\[\s*mcp_servers\s*\.\s*(?:agent-browser|"agent-browser"|'agent-browser')\s*\]\s*(?:#.*)?$/m;
 
 interface OwnedFile {
   path: string;
@@ -180,8 +183,17 @@ function allowedMutationRelative(
     : undefined;
 }
 
-function managedBlock(command: string): string {
-  return `${BEGIN_MARKER}\n[mcp_servers.loom]\ncommand = ${JSON.stringify(command)}\nargs = ["mcp"]\nrequired = false\nstartup_timeout_sec = 10\ntool_timeout_sec = 60\n${END_MARKER}\n`;
+function managedBlock(command: string, resources?: LoomResources): string {
+  const agent = resources?.mcp;
+  const agentEnvironment = Object.entries(agent?.env ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key} = ${JSON.stringify(value)}\n`)
+    .join("");
+  const agentBlock =
+    agent === undefined
+      ? ""
+      : `[mcp_servers.agent-browser]\ncommand = ${JSON.stringify(agent.command)}\nargs = ${JSON.stringify(agent.args)}\nrequired = false\nstartup_timeout_sec = 10\ntool_timeout_sec = 60\n${agentEnvironment === "" ? "" : `[mcp_servers.agent-browser.env]\n${agentEnvironment}`}`;
+  return `${BEGIN_MARKER}\n[mcp_servers.loom]\ncommand = ${JSON.stringify(command)}\nargs = ["mcp"]\nrequired = false\nstartup_timeout_sec = 10\ntool_timeout_sec = 60\n${agentBlock}${END_MARKER}\n`;
 }
 
 function blockRange(
@@ -380,7 +392,8 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       installed = ownership.harnesses.codex !== undefined;
       if (
         config !== undefined &&
-        SERVER_TABLE.test(config) &&
+        (SERVER_TABLE.test(config) ||
+          AGENT_BROWSER_SERVER_TABLE.test(config)) &&
         blockRange(config) === undefined
       ) {
         diagnostics.push(
@@ -417,6 +430,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
   async planInstall(
     root: string,
     _plan: CapabilityPlan,
+    resources?: LoomResources,
   ): Promise<ConfigMutationPlan> {
     const projectRoot = resolve(root);
     const configPath = resolve(projectRoot, CONFIG_PATH);
@@ -449,7 +463,26 @@ export class CodexHarnessAdapter implements HarnessAdapter {
 
     const previousFiles = ownedFileMap(ownership);
     const nextFiles: OwnedFile[] = [];
-    for (const skill of await collectSkillFiles(this.#skillsSource)) {
+    const skills = await collectSkillFiles(this.#skillsSource);
+    if (resources?.skill !== undefined) {
+      const relativePath = `.agents/skills/${resources.skill.name}/SKILL.md`;
+      if (!isSkillPath(relativePath))
+        diagnostics.push(
+          diagnostic(
+            "error",
+            "codex.skill-invalid",
+            "Resource skill name is invalid",
+            relativePath,
+          ),
+        );
+      else
+        skills.push({
+          source: "resource",
+          relativePath,
+          content: resources.skill.content,
+        });
+    }
+    for (const skill of skills) {
       const target = resolve(projectRoot, skill.relativePath);
       const existing = await readProjectOptional(
         projectRoot,
@@ -556,7 +589,7 @@ export class CodexHarnessAdapter implements HarnessAdapter {
       }
     }
 
-    const desiredBlock = managedBlock(this.#command);
+    const desiredBlock = managedBlock(this.#command, resources);
     const config = await readProjectOptional(
       projectRoot,
       CONFIG_PATH,
@@ -565,14 +598,14 @@ export class CodexHarnessAdapter implements HarnessAdapter {
     const range = config === undefined ? undefined : blockRange(config);
     if (
       config !== undefined &&
-      SERVER_TABLE.test(config) &&
+      (SERVER_TABLE.test(config) || AGENT_BROWSER_SERVER_TABLE.test(config)) &&
       range === undefined
     ) {
       diagnostics.push(
         diagnostic(
           "error",
           "codex.mcp-collision",
-          "mcp_servers.loom already exists outside Loom's marker block",
+          "A Loom-managed MCP server already exists outside Loom's marker block",
           configPath,
         ),
       );

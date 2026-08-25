@@ -1,5 +1,6 @@
 import {
   access,
+  chmod,
   mkdtemp,
   mkdir,
   readFile,
@@ -17,6 +18,7 @@ import {
   encodeSetupIntent,
   sha256,
 } from "@loom/core";
+import { WebAgentIntelligenceInstaller } from "@loom/installers";
 import { planProject } from "@loom/registry";
 
 import { configureCliRuntime, runCli, type RunCliOptions } from "./index.js";
@@ -813,5 +815,229 @@ describe("runCli", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).not.toContain("do-not-print-this");
     expect(result.stdout).toContain("[REDACTED]");
+  });
+
+  it.each(["opencode", "codex", "claude", "omp", "antigravity"])(
+    "accepts the audited web setup intent for %s",
+    async (harness) => {
+      const root = await fixture();
+      const browser = join(root, "browser");
+      await writeFile(browser, "browser");
+      await chmod(browser, 0o700);
+      const options: RunCliOptions = {
+        resolveExecutable: async () => process.execPath,
+        env: {
+          ...process.env,
+          HOME: root,
+          XDG_STATE_HOME: join(root, ".user-state"),
+          AGENT_BROWSER_EXECUTABLE_PATH: browser,
+        },
+      };
+      expect(
+        (await invoke(root, ["connect", "--harness", harness], options)).code,
+      ).toBe(0);
+      const intent = encodeSetupIntent({
+        schemaVersion: 1,
+        root,
+        projectFingerprint: setupFingerprint(root),
+        harness,
+        mode: "apply",
+        requestedCapabilities: await setupCapabilities(root),
+        selectedSkills: [],
+        selectionRationale: "Web recipe has no skills",
+      });
+      const result = await invoke(
+        root,
+        ["setup", "--dry-run", "--intent", intent],
+        options,
+      );
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stdout).toContain("agent-browser@0.34.0 + opensrc@0.7.3");
+    },
+  );
+
+  it("keeps web tools until the last harness consumer is removed", async () => {
+    const root = await fixture();
+    const browser = join(root, "browser");
+    await writeFile(browser, "browser");
+    await chmod(browser, 0o700);
+    const webInstaller = new WebAgentIntelligenceInstaller(async (request) => {
+      if (request.args[0] === "install")
+        await writeFile(
+          join(request.cwd, "package-lock.json"),
+          JSON.stringify({
+            lockfileVersion: 3,
+            packages: {
+              "": {
+                dependencies: {
+                  "agent-browser": "0.34.0",
+                  opensrc: "0.7.3",
+                },
+              },
+              "node_modules/agent-browser": {
+                version: "0.34.0",
+                integrity:
+                  "sha512-eR6Ey4I/DMs9zZ60b3ziV6pgLIgpxXWzggr3dfFbtskLmeXPJAgXCIIwVL4PihVYJqEUpvWgUKlZ2CIjY1u44g==",
+              },
+              "node_modules/opensrc": {
+                version: "0.7.3",
+                integrity:
+                  "sha512-REvdS9CG2q1KW6fiyLQkZgrhvNykARJCbigDF7vJOskGwqamwF74OzHRbgblZ7YlRkaLc7CTOsUMfnxw+NW83A==",
+              },
+            },
+          }),
+        );
+      if (request.args[0] === "ci") {
+        await mkdir(join(request.cwd, "node_modules/agent-browser/bin"), {
+          recursive: true,
+        });
+        await mkdir(join(request.cwd, "node_modules/opensrc/bin"), {
+          recursive: true,
+        });
+        await writeFile(
+          join(
+            request.cwd,
+            `node_modules/agent-browser/bin/agent-browser-${process.platform}-${process.arch}`,
+          ),
+          "agent",
+        );
+        await writeFile(
+          join(request.cwd, "node_modules/opensrc/bin/opensrc.js"),
+          "opensrc",
+        );
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const webPlan = await webInstaller.plan(
+      root,
+      process.execPath,
+      process.execPath,
+      browser,
+    );
+    const webApplied = await webInstaller.applyTransaction(webPlan);
+    expect(webApplied.diagnostics).toEqual([]);
+    await webInstaller.commit(webApplied.rollbackToken!);
+    expect((await invoke(root, ["connect", "--harness", "codex"])).code).toBe(
+      0,
+    );
+    expect((await invoke(root, ["connect", "--harness", "claude"])).code).toBe(
+      0,
+    );
+    await mkdir(join(root, ".loom"), { recursive: true });
+    await writeFile(
+      join(root, ".loom/workflow.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        version: "0.2.0",
+        harnesses: { codex: {}, claude: {} },
+      }),
+    );
+
+    const options = { webInstallerFactory: () => webInstaller };
+    expect(
+      (await invoke(root, ["remove", "--harness", "codex"], options)).code,
+    ).toBe(0);
+    expect(await exists(webPlan.toolRoot)).toBe(true);
+    expect(
+      (await invoke(root, ["remove", "--harness", "claude"], options)).code,
+    ).toBe(0);
+    expect(await exists(webPlan.toolRoot)).toBe(false);
+  });
+
+  it("keeps web tools when final harness removal fails", async () => {
+    const root = await fixture();
+    const browser = join(root, "browser");
+    await writeFile(browser, "browser");
+    await chmod(browser, 0o700);
+    const webInstaller = new WebAgentIntelligenceInstaller(async (request) => {
+      if (request.args[0] === "install")
+        await writeFile(
+          join(request.cwd, "package-lock.json"),
+          JSON.stringify({
+            lockfileVersion: 3,
+            packages: {
+              "": {
+                dependencies: {
+                  "agent-browser": "0.34.0",
+                  opensrc: "0.7.3",
+                },
+              },
+              "node_modules/agent-browser": {
+                version: "0.34.0",
+                integrity:
+                  "sha512-eR6Ey4I/DMs9zZ60b3ziV6pgLIgpxXWzggr3dfFbtskLmeXPJAgXCIIwVL4PihVYJqEUpvWgUKlZ2CIjY1u44g==",
+              },
+              "node_modules/opensrc": {
+                version: "0.7.3",
+                integrity:
+                  "sha512-REvdS9CG2q1KW6fiyLQkZgrhvNykARJCbigDF7vJOskGwqamwF74OzHRbgblZ7YlRkaLc7CTOsUMfnxw+NW83A==",
+              },
+            },
+          }),
+        );
+      if (request.args[0] === "ci") {
+        await mkdir(join(request.cwd, "node_modules/agent-browser/bin"), {
+          recursive: true,
+        });
+        await mkdir(join(request.cwd, "node_modules/opensrc/bin"), {
+          recursive: true,
+        });
+        await writeFile(
+          join(
+            request.cwd,
+            `node_modules/agent-browser/bin/agent-browser-${process.platform}-${process.arch}`,
+          ),
+          "agent",
+        );
+        await writeFile(
+          join(request.cwd, "node_modules/opensrc/bin/opensrc.js"),
+          "opensrc",
+        );
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const webPlan = await webInstaller.plan(
+      root,
+      process.execPath,
+      process.execPath,
+      browser,
+    );
+    const webApplied = await webInstaller.applyTransaction(webPlan);
+    await webInstaller.commit(webApplied.rollbackToken!);
+    expect((await invoke(root, ["connect", "--harness", "omp"])).code).toBe(0);
+    await writeFile(join(root, ".omp/mcp.json"), "{}");
+
+    expect(
+      (
+        await invoke(root, ["remove", "--harness", "omp"], {
+          webInstallerFactory: () => webInstaller,
+        })
+      ).code,
+    ).toBe(1);
+    expect(await exists(webPlan.toolRoot)).toBe(true);
+  });
+
+  it("requires Node and npm before planning web setup", async () => {
+    const root = await fixture();
+    expect((await invoke(root, ["connect", "--harness", "codex"])).code).toBe(
+      0,
+    );
+    const intent = encodeSetupIntent({
+      schemaVersion: 1,
+      root,
+      projectFingerprint: setupFingerprint(root),
+      harness: "codex",
+      mode: "apply",
+      requestedCapabilities: await setupCapabilities(root),
+      selectedSkills: [],
+      selectionRationale: "Web recipe has no skills",
+    });
+    const result = await invoke(root, ["setup", "--intent", intent], {
+      resolveExecutable: async () => undefined,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("setup.node-unavailable");
   });
 });

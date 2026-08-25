@@ -20,12 +20,14 @@ import type {
   Diagnostic,
   HarnessAdapter as CoreHarnessAdapter,
   HarnessState,
+  LoomResources,
 } from "@loom/core";
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
 
 const CONFIG_PATH = ".mcp.json";
 const OWNERSHIP_PATH = ".loom/ownership.json";
 const POINTER = "mcpServers.loom";
+const AGENT_BROWSER_POINTER = "mcpServers.agent-browser";
 
 interface OwnedPointer {
   path: string;
@@ -232,17 +234,17 @@ function formatting(text: string): {
   };
 }
 
-function setPointer(text: string, value: unknown): string {
+function setPointer(text: string, name: string, value: unknown): string {
   return applyEdits(
     text,
-    modify(text, ["mcpServers", "loom"], value, {
+    modify(text, ["mcpServers", name], value, {
       formattingOptions: formatting(text),
     }),
   );
 }
 
-function pointerValue(config: Record<string, unknown>): unknown {
-  return isRecord(config.mcpServers) ? config.mcpServers.loom : undefined;
+function pointerValue(config: Record<string, unknown>, name: string): unknown {
+  return isRecord(config.mcpServers) ? config.mcpServers[name] : undefined;
 }
 
 function emptyOwnership(): Ownership {
@@ -291,7 +293,7 @@ async function readOwnership(root: string): Promise<{
       if (
         pointers.some(
           ([key, pointer]) =>
-            key !== POINTER ||
+            (key !== POINTER && key !== AGENT_BROWSER_POINTER) ||
             !isRecord(pointer) ||
             pointer.path !== CONFIG_PATH ||
             !("value" in pointer),
@@ -443,6 +445,7 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
   async planInstall(
     root: string,
     _plan: CapabilityPlan,
+    resources?: LoomResources,
   ): Promise<ConfigMutationPlan> {
     const projectRoot = resolve(root);
     const diagnostics: Diagnostic[] = [];
@@ -452,9 +455,15 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
     const previous = state.ownership.harnesses.claude;
     const ownedFiles = previous?.files ?? {};
     const ownedPointer = previous?.pointers[POINTER];
+    const ownedAgentBrowserPointer = previous?.pointers[AGENT_BROWSER_POINTER];
     let desiredFiles: Record<string, string> = {};
     try {
       desiredFiles = await collectSkills(this.#skillsSource);
+      if (resources?.skill !== undefined) {
+        const path = `.claude/skills/${resources.skill.name}/SKILL.md`;
+        if (!isSkillPath(path)) throw new Error("Invalid Loom resource skill");
+        desiredFiles[path] = resources.skill.content;
+      }
     } catch {
       diagnostics.push(
         diagnostic(
@@ -563,7 +572,7 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
           ),
         );
       } else {
-        const current = pointerValue(parsed.value);
+        const current = pointerValue(parsed.value, "loom");
         if (
           ownedPointer !== undefined &&
           (ownedPointer.path !== CONFIG_PATH ||
@@ -586,7 +595,52 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
           );
         }
       }
-      const updated = setPointer(configText, desiredPointer);
+      const agentBrowser = resources?.mcp;
+      const desiredAgentBrowser =
+        agentBrowser === undefined
+          ? undefined
+          : {
+              type: "stdio",
+              command: agentBrowser.command,
+              args: [...agentBrowser.args],
+              ...(agentBrowser.env === undefined
+                ? {}
+                : { env: agentBrowser.env }),
+            };
+      const currentAgentBrowser = pointerValue(parsed.value, "agent-browser");
+      if (
+        ownedAgentBrowserPointer !== undefined &&
+        (ownedAgentBrowserPointer.path !== CONFIG_PATH ||
+          !sameValue(currentAgentBrowser, ownedAgentBrowserPointer.value))
+      ) {
+        diagnostics.push(
+          diagnostic(
+            "claude.modified-owned-pointer",
+            "Owned mcpServers.agent-browser was modified; refusing to overwrite it",
+            CONFIG_PATH,
+          ),
+        );
+      } else if (
+        desiredAgentBrowser !== undefined &&
+        ownedAgentBrowserPointer === undefined &&
+        currentAgentBrowser !== undefined
+      ) {
+        diagnostics.push(
+          diagnostic(
+            "claude.mcp-collision",
+            "mcpServers.agent-browser already exists and is not owned by Loom",
+            CONFIG_PATH,
+          ),
+        );
+      }
+      const updated = setPointer(
+        setPointer(configText, "loom", desiredPointer),
+        "agent-browser",
+        desiredAgentBrowser ??
+          (ownedAgentBrowserPointer === undefined
+            ? currentAgentBrowser
+            : undefined),
+      );
       if (updated !== configText) {
         mutations.push(
           mutation(
@@ -618,6 +672,21 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
       ),
       pointers: {
         [POINTER]: { path: CONFIG_PATH, value: desiredPointer },
+        ...(resources?.mcp === undefined
+          ? {}
+          : {
+              [AGENT_BROWSER_POINTER]: {
+                path: CONFIG_PATH,
+                value: {
+                  type: "stdio",
+                  command: resources.mcp.command,
+                  args: [...resources.mcp.args],
+                  ...(resources.mcp.env === undefined
+                    ? {}
+                    : { env: resources.mcp.env }),
+                },
+              },
+            }),
       },
     };
     const ownershipContent = `${JSON.stringify(nextOwnership, null, 2)}\n`;
@@ -857,8 +926,8 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
         );
       }
     }
-    const pointer = owned.pointers[POINTER];
-    if (pointer === undefined) {
+    const pointers = Object.entries(owned.pointers);
+    if (owned.pointers[POINTER] === undefined) {
       diagnostics.push(
         diagnostic(
           "claude.missing-pointer",
@@ -867,29 +936,34 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
       );
       return diagnostics;
     }
-    const content = await projectRead(projectRoot, pointer.path, diagnostics);
-    if (content === undefined) {
-      diagnostics.push(
-        diagnostic(
-          "claude.missing-config",
-          "Owned Claude MCP config is missing",
-          pointer.path,
-        ),
-      );
-    } else {
-      const parsed = parseConfig(content);
-      diagnostics.push(...parsed.diagnostics);
-      if (
-        parsed.value !== undefined &&
-        !sameValue(pointerValue(parsed.value), pointer.value)
-      ) {
+    for (const [key, pointer] of pointers) {
+      const content = await projectRead(projectRoot, pointer.path, diagnostics);
+      if (content === undefined) {
         diagnostics.push(
           diagnostic(
-            "claude.modified-owned-pointer",
-            "Owned mcpServers.loom was modified",
+            "claude.missing-config",
+            "Owned Claude MCP config is missing",
             pointer.path,
           ),
         );
+      } else {
+        const parsed = parseConfig(content);
+        diagnostics.push(...parsed.diagnostics);
+        if (
+          parsed.value !== undefined &&
+          !sameValue(
+            pointerValue(parsed.value, key.split(".")[1]!),
+            pointer.value,
+          )
+        ) {
+          diagnostics.push(
+            diagnostic(
+              "claude.modified-owned-pointer",
+              `Owned ${key} was modified`,
+              pointer.path,
+            ),
+          );
+        }
       }
     }
     return diagnostics;
@@ -974,8 +1048,7 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
       }
     }
     const remainingPointers: Record<string, OwnedPointer> = {};
-    const pointer = owned.pointers[POINTER];
-    if (pointer !== undefined) {
+    for (const [key, pointer] of Object.entries(owned.pointers)) {
       const absolute = resolve(projectRoot, pointer.path);
       const content = await projectRead(projectRoot, pointer.path, diagnostics);
       if (content === undefined) {
@@ -985,10 +1058,13 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
         diagnostics.push(...parsed.diagnostics);
         if (
           parsed.value === undefined ||
-          !sameValue(pointerValue(parsed.value), pointer.value)
+          !sameValue(
+            pointerValue(parsed.value, key.split(".")[1]!),
+            pointer.value,
+          )
         ) {
           skipped.push(absolute);
-          remainingPointers[POINTER] = pointer;
+          remainingPointers[key] = pointer;
           diagnostics.push(
             diagnostic(
               "claude.modified-owned-pointer",
@@ -997,7 +1073,7 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
             ),
           );
         } else {
-          const updated = setPointer(content, undefined);
+          const updated = setPointer(content, key.split(".")[1]!, undefined);
           if (updated !== content) {
             changed.push(absolute);
             if (!dryRun) {
@@ -1009,7 +1085,7 @@ export class ClaudeHarnessAdapter implements CoreHarnessAdapter {
               } catch {
                 changed.pop();
                 skipped.push(absolute);
-                remainingPointers[POINTER] = pointer;
+                remainingPointers[key] = pointer;
                 diagnostics.push(
                   diagnostic(
                     "claude.uninstall-failed",

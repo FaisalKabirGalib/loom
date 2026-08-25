@@ -57,6 +57,11 @@ same hash.
   and mutable registry references are rejected.
 - Setup transactions record exact plan and recipe digests. Rollback removes only
   setup-owned external resources and retains the Loom connection.
+- The web-agent-intelligence boundary verifies reviewed npm SRI values for
+  `agent-browser@0.34.0` and `opensrc@0.7.3`, disables lifecycle scripts, uses a
+  project-local npm cache/HOME/XDG state, and never configures `npx`. Browser
+  downloads are deliberately not automatic because they cannot be bound to the
+  reviewed npm integrity; the user receives a manual local command instead.
 
 ## State and output
 
